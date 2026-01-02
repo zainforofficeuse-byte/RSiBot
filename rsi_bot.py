@@ -61,7 +61,8 @@ st.markdown(f"**Scanning for coins crossing RSI {RSI_OVERBOUGHT} on {selected_tf
 
 # Scan Button
 if st.button("🔄 Start Market Scan", type="primary"):
-    client = init_client()
+    # Agar server USA mein hai to tld='us' lagana parta hai
+client = Client(tld='us')
     
     # UI Elements for progress
     status_text = st.empty()
@@ -122,4 +123,5 @@ if st.button("🔄 Start Market Scan", type="primary"):
         st.error(f"An error occurred: {e}")
 
 else:
+
     st.write("Waiting for scan...")
