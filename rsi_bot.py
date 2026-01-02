@@ -1,5 +1,6 @@
 import streamlit as st
 from binance.client import Client
+from binance.exceptions import BinanceAPIException
 import pandas as pd
 import ta
 import time
@@ -29,7 +30,7 @@ st.sidebar.title("⚙️ Scanner Settings")
 # Market & Connection
 MARKET_TYPE = st.sidebar.radio("Market Type", ["Spot", "Futures"], horizontal=True)
 USE_US_BINANCE = st.sidebar.checkbox("Use Binance.US", value=False)
-PROXY_URL = st.sidebar.text_input("Proxy URL (Optional)", placeholder="http://1.2.3.4:8080")
+PROXY_URL = st.sidebar.text_input("Proxy URL (Optional)", placeholder="http://user:pass@ip:port")
 
 st.sidebar.divider()
 
@@ -137,7 +138,22 @@ if st.button("🔄 Start Market Scan", type="primary"):
         st.error("❌ Binance.US does not support Futures.")
         st.stop()
 
-    client = init_client(USE_US_BINANCE, PROXY_URL)
+    # --- Robust Client Initialization ---
+    try:
+        client = init_client(USE_US_BINANCE, PROXY_URL)
+        # Quick check if connection works
+        client.get_system_status() 
+    except BinanceAPIException as e:
+        st.error("🚨 **Connection Error:** Binance blocked the connection.")
+        st.error(f"**Details:** {e}")
+        st.warning("👉 **Fix:** If you are on Streamlit Cloud (US Server), you MUST provide a valid **Proxy URL** in the sidebar to access Binance Global.")
+        st.stop()
+    except Exception as e:
+        st.error(f"❌ **Failed to connect:** {e}")
+        st.info("Check your Proxy URL format. It should be: `http://user:pass@ip:port`")
+        st.stop()
+    # ------------------------------------
+
     status_text = st.empty()
     progress_bar = st.progress(0)
     
