@@ -4,22 +4,26 @@ import pandas as pd
 import ta
 import time
 
-# --- PAGE CONFIGURATION (Browser Tab Title etc) ---
+# --- PAGE CONFIGURATION ---
 st.set_page_config(
     page_title="Binance RSI Scanner",
     page_icon="🚀",
     layout="wide"
 )
 
-# --- SIDEBAR SETTINGS (Control Panel) ---
+# --- SIDEBAR SETTINGS ---
 st.sidebar.title("⚙️ Scanner Settings")
 
-# Market Type Selection (Spot vs Futures)
+# Market Type Selection
 MARKET_TYPE = st.sidebar.radio("Market Type", ["Spot", "Futures"])
 
-# User se inputs lena
+# Region Selection (Fix for USA/Streamlit Cloud)
+USE_US_BINANCE = st.sidebar.checkbox("Use Binance.US (Check if on Cloud)", value=False, help="Enable this if you are running on Streamlit Cloud or in the USA to avoid API restrictions.")
+
+# RSI Level Input
 RSI_OVERBOUGHT = st.sidebar.number_input("RSI Alert Level", min_value=50, max_value=100, value=82)
 
+# Timeframe Selection
 TIMEFRAME_OPTIONS = {
     "4 Hours": Client.KLINE_INTERVAL_4HOUR,
     "1 Hour": Client.KLINE_INTERVAL_1HOUR,
@@ -31,14 +35,17 @@ TIMEFRAME = TIMEFRAME_OPTIONS[selected_tf_label]
 
 st.sidebar.info(f"Click 'Start Scan' to check all {MARKET_TYPE} USDT pairs.")
 
-# --- MAIN FUNCTIONS ---
+# --- FUNCTIONS ---
 @st.cache_resource
-def init_client():
+def init_client(use_us):
+    # Agar US checkbox tick hai to US server use karega
+    if use_us:
+        return Client(tld='us')
     return Client()
 
 def get_rsi(client, symbol, tf, market_type):
     try:
-        # Market type ke hisaab se data fetch karna
+        # Data fetching logic based on market type
         if market_type == "Spot":
             klines = client.get_klines(symbol=symbol, interval=tf, limit=100)
         else:
@@ -51,28 +58,29 @@ def get_rsi(client, symbol, tf, market_type):
         ])
         df['close'] = df['close'].astype(float)
         rsi = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
-        return rsi.iloc[-2], rsi.iloc[-1] # Prev, Curr
-    except Exception as e:
+        return rsi.iloc[-2], rsi.iloc[-1] # Previous, Current
+    except Exception:
         return None, None
 
-# --- UI LAYOUT ---
+# --- MAIN UI ---
 st.title(f"🚀 Crypto RSI Alert Dashboard ({MARKET_TYPE})")
-st.markdown(f"**Scanning for coins crossing RSI {RSI_OVERBOUGHT} on {selected_tf_label} timeframe in {MARKET_TYPE} Market.**")
+st.markdown(f"**Scanning for coins crossing RSI {RSI_OVERBOUGHT} on {selected_tf_label} timeframe.**")
+
+if USE_US_BINANCE:
+    st.warning("🇺🇸 Using Binance.US servers (Limited pairs, but works on US Cloud).")
 
 # Scan Button
 if st.button("🔄 Start Market Scan", type="primary"):
-    # Agar server USA mein hai to tld='us' lagana parta hai
-client = Client(tld='us')
+    # Client initialize karte waqt US setting pass kar rahay hain
+    client = init_client(USE_US_BINANCE)
     
-    # UI Elements for progress
     status_text = st.empty()
     progress_bar = st.progress(0)
-    results_container = st.container()
     
     try:
         status_text.text(f"Fetching {MARKET_TYPE} pairs from Binance...")
         
-        # Market type ke hisaab se symbols fetch karna
+        # Symbol fetching based on market type
         if MARKET_TYPE == "Spot":
             exchange_info = client.get_exchange_info()
         else:
@@ -83,23 +91,18 @@ client = Client(tld='us')
             if s['symbol'].endswith('USDT') and s['status'] == 'TRADING'
         ]
         
-        # Testing ke liye agar chaho to kam symbols kar lo:
-        # symbols = symbols[:20] 
-        
         alerts = []
         total_symbols = len(symbols)
         
         for i, symbol in enumerate(symbols):
-            # Update Progress Bar
+            # Progress bar update
             progress = (i + 1) / total_symbols
             progress_bar.progress(progress)
             status_text.text(f"Scanning {i+1}/{total_symbols}: {symbol}...")
             
-            # Get RSI (Market type pass kar rahe hain)
             prev_rsi, curr_rsi = get_rsi(client, symbol, TIMEFRAME, MARKET_TYPE)
             
             if prev_rsi is not None:
-                # Check Alert Condition
                 if prev_rsi < RSI_OVERBOUGHT and curr_rsi >= RSI_OVERBOUGHT:
                     alerts.append({
                         "Symbol": symbol,
@@ -109,19 +112,16 @@ client = Client(tld='us')
                     })
         
         progress_bar.empty()
-        status_text.success(f"✅ Scan Complete! Scanned {total_symbols} {MARKET_TYPE} coins.")
+        status_text.success(f"✅ Scan Complete! Scanned {total_symbols} coins.")
         
-        # Display Results
         if alerts:
             st.error(f"🚨 Found {len(alerts)} Coins with High RSI!")
-            df_results = pd.DataFrame(alerts)
-            st.dataframe(df_results, use_container_width=True)
+            st.dataframe(pd.DataFrame(alerts), use_container_width=True)
         else:
-            st.success("👍 No coins found crossing the RSI limit right now.")
+            st.success("👍 No coins found crossing the RSI limit.")
             
     except Exception as e:
-        st.error(f"An error occurred: {e}")
+        st.error(f"Error: {e}. Try checking 'Use Binance.US' in the sidebar if you are on Streamlit Cloud.")
 
 else:
-
     st.write("Waiting for scan...")
