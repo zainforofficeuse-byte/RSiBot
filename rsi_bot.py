@@ -12,11 +12,10 @@ st.set_page_config(
     page_title="Binance RSI Auto-Trader",
     page_icon="🤖",
     layout="wide",
-    initial_sidebar_state="expanded" # Mobile par menu dhundne me asani ho
+    initial_sidebar_state="expanded" 
 )
 
-# --- CLEANER APP STYLE (Fixed for Mobile) ---
-# Header ko hide nahi kar rahay taakay Mobile Menu button nazar aaye
+# --- CLEANER APP STYLE ---
 hide_st_style = """
             <style>
             #MainMenu {visibility: hidden;} 
@@ -34,8 +33,8 @@ st.sidebar.subheader("🔌 Connection")
 MARKET_TYPE = st.sidebar.radio("Market Type", ["Spot", "Futures"], horizontal=True)
 USE_US_BINANCE = st.sidebar.checkbox("Use Binance.US", value=False)
 
-with st.sidebar.expander("🔐 API Keys (Required for Trading)", expanded=True):
-    st.info("⚠️ Auto-Trading ke liye API Keys zaroori hain. Binance App > API Management se create karein.")
+with st.sidebar.expander("🔐 API Keys (Optional)", expanded=True):
+    st.info("Keys sirf data limits barhane ke liye hain. Real Trading disabled hai.")
     USER_API_KEY = st.text_input("API Key", type="password")
     USER_API_SECRET = st.text_input("API Secret", type="password")
 
@@ -43,16 +42,15 @@ PROXY_URL = st.sidebar.text_input("Proxy URL (Optional)", placeholder="http://us
 
 st.sidebar.divider()
 
-# 2. AUTO TRADING SECTION (NEW)
-st.sidebar.subheader("🤖 Auto Trading (Beta)")
-ENABLE_AUTOTRADE = st.sidebar.checkbox("Enable Auto-Buy/Sell", value=False)
-TRADING_MODE = st.sidebar.radio("Trading Mode", ["Paper Trading (Simulation)", "Real Trading (Use Real Funds)"])
+# 2. AUTO TRADING SECTION (SIMULATION ONLY)
+st.sidebar.subheader("🤖 Auto Trading (Simulation)")
+ENABLE_AUTOTRADE = st.sidebar.checkbox("Enable Paper Trading (Test Mode)", value=False)
 
 if ENABLE_AUTOTRADE:
     col_t1, col_t2 = st.sidebar.columns(2)
-    TRADE_AMOUNT_USDT = col_t1.number_input("Amount per Trade ($)", min_value=10.0, value=15.0)
+    TRADE_AMOUNT_USDT = col_t1.number_input("Simulated Amount ($)", min_value=10.0, value=15.0)
     MAX_OPEN_TRADES = col_t2.number_input("Max Trades per Scan", min_value=1, value=3)
-    st.sidebar.warning(f"⚠️ Bot will try to buy max {MAX_OPEN_TRADES} coins with ${TRADE_AMOUNT_USDT} each.")
+    st.sidebar.info(f"ℹ️ Sirf Testing hogi. Asli paisay nahi lagenge.")
 
 st.sidebar.divider()
 
@@ -115,42 +113,21 @@ def get_tf_in_minutes(tf_str):
     mapping = {'15m':15, '1h':60, '4h':240, '12h':720, '1d':1440}
     return mapping.get(tf_str, 240)
 
-def place_order(client, symbol, side, amount_usdt, price, mode):
+def place_order_simulation(symbol, side, amount_usdt, price):
+    """
+    Sirf Simulation Order generate karta hai.
+    Real trading logic completely removed.
+    """
     qty = amount_usdt / price
-    
-    # Binance limits adjustment (Precision fix needed in production, simplified here)
-    # Usually we need to step_size adjust. Here we assume generic float for Paper Trading.
-    
-    if mode == "Paper Trading (Simulation)":
-        return {
-            "symbol": symbol,
-            "orderId": "SIMULATED_123",
-            "status": "FILLED",
-            "type": "MARKET",
-            "side": side,
-            "executedQty": f"{qty:.5f}",
-            "cummulativeQuoteQty": f"{amount_usdt:.2f}"
-        }
-    else:
-        # REAL ORDER
-        # Note: Precision handling is complex. Using generic create_order for Market.
-        # Ideally: qty = round_step_size(qty, step_size)
-        try:
-            # Check Balance first
-            bal = client.get_asset_balance(asset='USDT')
-            if float(bal['free']) < amount_usdt:
-                return {"error": "Insufficient USDT Balance"}
-
-            # Execute Order (QuoteOrderQty ensures we spend exactly X USDT)
-            order = client.create_order(
-                symbol=symbol,
-                side=side,
-                type='MARKET',
-                quoteOrderQty=amount_usdt 
-            )
-            return order
-        except Exception as e:
-            return {"error": str(e)}
+    return {
+        "symbol": symbol,
+        "orderId": f"SIM-{int(time.time())}",
+        "status": "FILLED",
+        "type": "MARKET (PAPER)",
+        "side": side,
+        "executedQty": f"{qty:.5f}",
+        "cummulativeQuoteQty": f"{amount_usdt:.2f}"
+    }
 
 def get_data_with_rsi(client, symbol, tf, market_type, limit=500):
     try:
@@ -169,22 +146,20 @@ def get_data_with_rsi(client, symbol, tf, market_type, limit=500):
         return None
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance RSI Auto-Trader ({MARKET_TYPE})")
+st.title(f"🤖 Binance RSI Scanner ({MARKET_TYPE})")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
 
 # Trading Status Bar
 if ENABLE_AUTOTRADE:
-    if TRADING_MODE == "Paper Trading (Simulation)":
-        st.info(f"🔵 **SIMULATION MODE:** Bot will 'pretend' to buy coins. (Limit: {MAX_OPEN_TRADES} trades)")
-    else:
-        st.error(f"🔴 **REAL TRADING ACTIVE:** Bot WILL spend real money! (Limit: {MAX_OPEN_TRADES} trades)")
+    st.info(f"🔵 **SIMULATION MODE ACTIVE:** Bot will 'pretend' to buy coins. (Max {MAX_OPEN_TRADES} trades)")
 else:
-    st.markdown("**Status:** 🟢 Scanner Only (No trades will be executed)")
+    st.markdown("**Status:** 🟢 Scanner Only")
 
 # Button
-btn_label = "🔄 Scan & Auto-Trade" if ENABLE_AUTOTRADE else "🔄 Start Scanner"
+btn_label = "🔄 Scan & Simulate" if ENABLE_AUTOTRADE else "🔄 Start Scanner"
+
 if st.button(btn_label, type="primary"):
     
     if USE_US_BINANCE and MARKET_TYPE == "Futures":
@@ -192,9 +167,6 @@ if st.button(btn_label, type="primary"):
 
     try:
         client = init_client(USE_US_BINANCE, PROXY_URL, USER_API_KEY, USER_API_SECRET)
-        if ENABLE_AUTOTRADE and TRADING_MODE != "Paper Trading (Simulation)":
-            # Verify Keys for real trading
-            client.get_account() 
     except Exception as e:
         st.error(f"❌ Connection/Auth Error: {e}"); st.stop()
 
@@ -203,12 +175,27 @@ if st.button(btn_label, type="primary"):
     
     try:
         status_text.text(f"Fetching {MARKET_TYPE} pairs...")
-        if MARKET_TYPE == "Spot": exchange_info = client.get_exchange_info()
-        else: exchange_info = client.futures_exchange_info()
-            
+        
+        # --- 1. Fetch Symbols & Funding Rates (If Futures) ---
+        funding_map = {}
+        
+        if MARKET_TYPE == "Spot": 
+            exchange_info = client.get_exchange_info()
+        else: 
+            # Futures: Exchange Info + Funding Rates fetch karein
+            exchange_info = client.futures_exchange_info()
+            try:
+                status_text.text("Fetching Funding Rates...")
+                mark_prices = client.futures_mark_price()
+                # Create a dictionary for fast lookup: {'BTCUSDT': 0.0001, ...}
+                for item in mark_prices:
+                    funding_map[item['symbol']] = float(item['lastFundingRate'])
+            except Exception as e:
+                st.warning(f"Could not fetch funding rates: {e}")
+
         symbols = [s['symbol'] for s in exchange_info['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'TRADING']
         
-        # Candle Logic
+        # --- 2. Candle Setup ---
         candles_needed = 100 
         days_to_check = REPORT_DAYS if SEARCH_MODE == "📊 All-in-One Report" else 0
         if SEARCH_MODE == "Sustained Trend (Days)": days_to_check = SUSTAINED_DAYS
@@ -234,6 +221,13 @@ if st.button(btn_label, type="primary"):
                 prev_rsi = df['rsi'].iloc[-2]
                 curr_price = df['close'].iloc[-1]
                 
+                # Funding Rate Logic
+                funding_rate_display = "N/A"
+                if MARKET_TYPE == "Futures" and symbol in funding_map:
+                    fr = funding_map[symbol]
+                    # Display as percentage (e.g., 0.0100%)
+                    funding_rate_display = f"{fr * 100:.4f}%"
+
                 match_found = False
                 status_msg = ""
                 signal_type = "NEUTRAL"
@@ -254,20 +248,15 @@ if st.button(btn_label, type="primary"):
                         if prev_rsi > RSI_ALERT_LEVEL and curr_rsi <= RSI_ALERT_LEVEL:
                             match_found = True; status_msg = "CROSS BELOW"; signal_type = "BUY"
                 
-                # --- AUTO TRADE EXECUTION ---
+                # --- AUTO TRADE EXECUTION (SIMULATION) ---
                 trade_result = None
                 if match_found and ENABLE_AUTOTRADE and trades_executed < MAX_OPEN_TRADES:
-                    # Only Auto-Buy on valid Buy Signals
                     if signal_type == "BUY":
-                        st.toast(f"⚡ Attempting to BUY {symbol}...")
-                        trade_result = place_order(client, symbol, "BUY", TRADE_AMOUNT_USDT, curr_price, TRADING_MODE)
-                        
-                        if "error" in trade_result:
-                            status_msg += f" | ❌ Trade Failed: {trade_result['error']}"
-                        else:
-                            status_msg += " | ✅ TRADED"
-                            trades_executed += 1
-                            trade_logs.append(trade_result)
+                        st.toast(f"⚡ Simulating BUY {symbol}...")
+                        trade_result = place_order_simulation(symbol, "BUY", TRADE_AMOUNT_USDT, curr_price)
+                        status_msg += " | ✅ SIMULATED"
+                        trades_executed += 1
+                        trade_logs.append(trade_result)
 
                 if match_found:
                     alerts.append({
@@ -275,12 +264,12 @@ if st.button(btn_label, type="primary"):
                         "Price": curr_price,
                         "RSI": round(curr_rsi, 2),
                         "Signal": signal_type,
+                        "Funding Rate": funding_rate_display, # New Column
                         "Status": status_msg
                     })
                     
-            # Stop scanning if max trades reached to save time/API
             if ENABLE_AUTOTRADE and trades_executed >= MAX_OPEN_TRADES:
-                status_text.warning(f"🛑 Max trades ({MAX_OPEN_TRADES}) reached. Stopping scan.")
+                status_text.warning(f"🛑 Max simulation trades ({MAX_OPEN_TRADES}) reached.")
                 break
 
         progress_bar.empty()
@@ -288,13 +277,14 @@ if st.button(btn_label, type="primary"):
         
         # Display Trades
         if trade_logs:
-            st.subheader(f"📜 Trade Execution Log ({TRADING_MODE})")
+            st.subheader(f"📜 Simulation Log")
             st.json(trade_logs)
 
         # Display Scan Results
         if alerts:
             st.subheader("📊 Scan Results")
-            st.dataframe(pd.DataFrame(alerts), use_container_width=True)
+            df_results = pd.DataFrame(alerts)
+            st.dataframe(df_results, use_container_width=True)
         else:
             st.warning("No signals found.")
             
