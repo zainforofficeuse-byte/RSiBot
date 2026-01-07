@@ -2,3 +2,5 @@ streamlit
 python-binance
 pandas
 ta
+requests
+plotly
