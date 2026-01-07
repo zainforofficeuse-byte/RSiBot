@@ -11,7 +11,7 @@ from plotly.subplots import make_subplots
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Auto-Trader 2.0",
+    page_title="Binance RSI Auto-Trader 2.3",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded" 
@@ -27,14 +27,14 @@ hide_st_style = """
             """
 st.markdown(hide_st_style, unsafe_allow_html=True)
 
-# --- SESSION STATE INITIALIZATION (Memory) ---
+# --- SESSION STATE INITIALIZATION ---
 if 'scan_results' not in st.session_state:
     st.session_state.scan_results = []
 if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Bot Settings 2.0")
+st.sidebar.title("⚙️ Bot Settings 2.3")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
@@ -130,7 +130,7 @@ def place_order_simulation(symbol, side, amount_usdt, price):
         "cummulativeQuoteQty": f"{amount_usdt:.2f}"
     }
 
-def get_data_with_rsi(client, symbol, tf, market_type, limit=500):
+def get_data_with_indicators(client, symbol, tf, market_type, limit=500):
     try:
         if market_type == "Spot":
             klines = client.get_klines(symbol=symbol, interval=tf, limit=limit)
@@ -140,57 +140,93 @@ def get_data_with_rsi(client, symbol, tf, market_type, limit=500):
         df = pd.DataFrame(klines, columns=[
             'time','open','high','low','close','volume','close_time','qav','num_trades','tbv','tqv','ignore'
         ])
-        df['time'] = pd.to_datetime(df['time'], unit='ms') # Date format fix for charts
+        df['time'] = pd.to_datetime(df['time'], unit='ms')
         df['open'] = df['open'].astype(float)
         df['high'] = df['high'].astype(float)
         df['low'] = df['low'].astype(float)
         df['close'] = df['close'].astype(float)
         df['volume'] = df['volume'].astype(float)
         
-        # Calculate RSI
+        # 1. Calculate RSI
         df['rsi'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
         
-        # Calculate RVOL
+        # 2. Calculate RVOL
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
         df['rvol'] = df['volume'] / df['vol_sma']
+
+        # 3. Calculate MACD
+        macd = ta.trend.MACD(close=df['close'])
+        df['macd'] = macd.macd()
+        df['macd_signal'] = macd.macd_signal()
+        df['macd_diff'] = macd.macd_diff()
         
         return df
     except:
         return None
 
+def check_funding_flip(client, symbol):
+    """
+    Checks if funding rate flipped sign in the last 2 settlements.
+    Returns string descriptor or None.
+    """
+    try:
+        # Limit 2 gives current and previous settled rate
+        rates = client.futures_funding_rate(symbol=symbol, limit=2)
+        if len(rates) < 2: return None
+        
+        curr = float(rates[-1]['fundingRate'])
+        prev = float(rates[-2]['fundingRate'])
+        
+        # Extract time
+        flip_ts = rates[-1]['fundingTime']
+        # Convert to readable format (HH:MM)
+        flip_time = datetime.fromtimestamp(flip_ts / 1000).strftime('%H:%M')
+        
+        if prev < 0 and curr > 0: return f"Flip Pos 🟢 {flip_time}"
+        if prev > 0 and curr < 0: return f"Flip Neg 🔴 {flip_time}"
+        return None
+    except:
+        return None
+
 def plot_chart(client, symbol, tf, market_type):
     with st.spinner(f"Loading Chart for {symbol}..."):
-        df = get_data_with_rsi(client, symbol, tf, market_type, limit=150)
+        df = get_data_with_indicators(client, symbol, tf, market_type, limit=150)
         if df is None:
             st.error("Could not load chart data.")
             return
 
-        # Create Subplots (Price + RSI)
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+        # Create Subplots (Price + RSI + MACD)
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                             vertical_spacing=0.05, 
-                            subplot_titles=(f'{symbol} Price Action', 'RSI (14)'),
-                            row_width=[0.3, 0.7])
+                            subplot_titles=(f'{symbol} Price', 'RSI (14)', 'MACD'),
+                            row_width=[0.2, 0.2, 0.6])
 
-        # Candlestick
+        # 1. Candlestick
         fig.add_trace(go.Candlestick(x=df['time'],
                         open=df['open'], high=df['high'],
                         low=df['low'], close=df['close'], name='Price'), row=1, col=1)
 
-        # RSI Line
+        # 2. RSI Line
         fig.add_trace(go.Scatter(x=df['time'], y=df['rsi'], name='RSI', line=dict(color='purple', width=2)), row=2, col=1)
-
-        # RSI Zones (70/30)
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+        # 3. MACD
+        fig.add_trace(go.Scatter(x=df['time'], y=df['macd'], name='MACD', line=dict(color='blue', width=1.5)), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df['time'], y=df['macd_signal'], name='Signal', line=dict(color='orange', width=1.5)), row=3, col=1)
+        
+        # MACD Histogram colors
+        colors = ['green' if val >= 0 else 'red' for val in df['macd_diff']]
+        fig.add_trace(go.Bar(x=df['time'], y=df['macd_diff'], name='Hist', marker_color=colors), row=3, col=1)
         
         # Layout Styling
-        fig.update_layout(xaxis_rangeslider_visible=False, height=600, template="plotly_dark")
+        fig.update_layout(xaxis_rangeslider_visible=False, height=800, template="plotly_dark")
         
         st.plotly_chart(fig, use_container_width=True)
 
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance RSI Scanner 2.0")
+st.title(f"🤖 Binance RSI Pro Bot 2.3")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -238,7 +274,7 @@ if st.button(btn_label, type="primary"):
         if SEARCH_MODE == "Sustained Trend (Days)": days_to_check = SUSTAINED_DAYS
         if days_to_check > 0:
             tf_minutes = get_tf_in_minutes(TIMEFRAME)
-            candles_needed = int((days_to_check * 1440) / tf_minutes) + 20
+            candles_needed = int((days_to_check * 1440) / tf_minutes) + 30 
 
         alerts = []
         trades_executed = 0
@@ -249,36 +285,55 @@ if st.button(btn_label, type="primary"):
             progress_bar.progress((i + 1) / total_symbols)
             status_text.text(f"Scanning {i+1}/{total_symbols}: {symbol}...")
             
-            df = get_data_with_rsi(client, symbol, TIMEFRAME, MARKET_TYPE, limit=max(100, candles_needed))
+            df = get_data_with_indicators(client, symbol, TIMEFRAME, MARKET_TYPE, limit=max(100, candles_needed))
             
-            if df is not None and len(df) > 20:
+            if df is not None and len(df) > 30:
                 curr_rsi = df['rsi'].iloc[-1]
                 prev_rsi = df['rsi'].iloc[-2]
                 curr_price = df['close'].iloc[-1]
                 curr_rvol = df['rvol'].iloc[-1]
                 
+                # MACD Values
+                curr_macd = df['macd'].iloc[-1]
+                curr_signal = df['macd_signal'].iloc[-1]
+                macd_trend = "BULLISH 🟢" if curr_macd > curr_signal else "BEARISH 🔴"
+                
+                # Funding Logic
                 funding_rate_display = "N/A"
                 if MARKET_TYPE == "Futures" and symbol in funding_map:
-                    funding_rate_display = f"{funding_map[symbol] * 100:.4f}%"
+                    fr = funding_map[symbol]
+                    funding_rate_display = f"{fr * 100:.4f}%"
 
                 match_found = False
                 status_msg = ""
                 signal_type = "NEUTRAL"
+                group_tag = "Normal" 
                 
-                # --- LOGIC SELECTION ---
+                # --- LOGIC SELECTION & GROUPING ---
                 if SEARCH_MODE == "📊 All-in-One Report":
-                    if curr_rsi <= OVERSOLD_VAL:
-                         match_found = True; status_msg = "Oversold Zone"; signal_type = "BUY"
-                    elif prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL:
-                         match_found = True; status_msg = "📉 BREAKDOWN (Buy Dip)"; signal_type = "BUY"
+                    # Priority 1: Fresh Signals
+                    if prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL:
+                         match_found = True; status_msg = "📉 BREAKDOWN (Buy Dip)"; signal_type = "BUY"; group_tag = "Signal"
+                    elif prev_rsi < OVERBOUGHT_VAL and curr_rsi >= OVERBOUGHT_VAL:
+                         match_found = True; status_msg = "🚀 BREAKOUT (Pump)"; signal_type = "SELL"; group_tag = "Signal"
+                    
+                    # Priority 2: Zones
+                    elif curr_rsi <= OVERSOLD_VAL:
+                         match_found = True; status_msg = "Oversold Zone"; signal_type = "BUY"; group_tag = "Oversold"
                     elif curr_rsi >= OVERBOUGHT_VAL:
-                         match_found = True; status_msg = "Overbought Zone"; signal_type = "SELL"
+                         match_found = True; status_msg = "Overbought Zone"; signal_type = "SELL"; group_tag = "Overbought"
                 
                 elif SEARCH_MODE == "Crossover Alert":
                     if RSI_ALERT_LEVEL < 50:
                         if prev_rsi > RSI_ALERT_LEVEL and curr_rsi <= RSI_ALERT_LEVEL:
-                            match_found = True; status_msg = "CROSS BELOW"; signal_type = "BUY"
+                            match_found = True; status_msg = "CROSS BELOW"; signal_type = "BUY"; group_tag="Alert"
                 
+                # --- FUNDING CHANGE CHECK (Only for Matched Coins) ---
+                if match_found and MARKET_TYPE == "Futures":
+                     flip_status = check_funding_flip(client, symbol)
+                     if flip_status:
+                         funding_rate_display += f" ({flip_status})"
+
                 # --- AUTO TRADE SIMULATION ---
                 if match_found and ENABLE_AUTOTRADE and trades_executed < MAX_OPEN_TRADES:
                     if signal_type == "BUY":
@@ -294,9 +349,11 @@ if st.button(btn_label, type="primary"):
                         "Price": curr_price,
                         "RSI": round(curr_rsi, 2),
                         "RVOL": round(curr_rvol, 2),
+                        "Trend (MACD)": macd_trend, 
                         "Signal": signal_type,
                         "Funding": funding_rate_display,
-                        "Status": status_msg
+                        "Status": status_msg,
+                        "Group": group_tag 
                     })
             
             # Limit trades per scan
@@ -336,9 +393,38 @@ if st.session_state.scan_performed:
         
         with tab1:
             st.subheader(f"Found {len(alerts)} Signals")
-            df_results = pd.DataFrame(alerts)
-            st.dataframe(df_results, use_container_width=True)
+            df_res = pd.DataFrame(alerts)
             
+            # --- RESTORED SECTIONS LOGIC ---
+            if SEARCH_MODE == "📊 All-in-One Report":
+                
+                # 1. Signals
+                df_sig = df_res[df_res['Group'] == 'Signal']
+                if not df_sig.empty:
+                    st.subheader("⚡ Fresh Signals (Breakouts/Breakdowns)")
+                    st.dataframe(df_sig.drop(columns=['Group']), use_container_width=True)
+
+                # 2. Oversold
+                df_os = df_res[df_res['Group'] == 'Oversold']
+                if not df_os.empty:
+                    st.subheader(f"🟢 Oversold / Buying Zones (< {OVERSOLD_VAL})")
+                    st.dataframe(df_os.drop(columns=['Group']).sort_values("RSI"), use_container_width=True)
+
+                # 3. Overbought
+                df_ob = df_res[df_res['Group'] == 'Overbought']
+                if not df_ob.empty:
+                    st.subheader(f"🔴 Overbought / Selling Zones (> {OVERBOUGHT_VAL})")
+                    st.dataframe(df_ob.drop(columns=['Group']).sort_values("RSI", ascending=False), use_container_width=True)
+                
+                # Fallback if specific filtering fails but rows exist
+                if df_sig.empty and df_os.empty and df_ob.empty:
+                    st.dataframe(df_res.drop(columns=['Group']), use_container_width=True)
+
+            else:
+                # Normal view for other modes
+                st.dataframe(df_res.drop(columns=['Group']), use_container_width=True)
+            
+            # Simulation Logs
             if 'trade_logs' in st.session_state and st.session_state.trade_logs:
                 st.divider()
                 st.subheader("📜 Simulation Log")
@@ -347,16 +433,17 @@ if st.session_state.scan_performed:
         with tab2:
             st.subheader(f"{selected_coin} Analysis ({TIMEFRAME})")
             
-            # Find details of selected coin from alerts
+            # Find details
             coin_details = next((item for item in alerts if item['Symbol'] == selected_coin), None)
             
             if coin_details:
                 # Top Metrics
-                c1, c2, c3, c4 = st.columns(4)
+                c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("Price", f"${coin_details['Price']}")
                 c2.metric("RSI", coin_details['RSI'])
                 c3.metric("RVOL", coin_details['RVOL'])
-                c4.metric("Signal", coin_details['Signal'], delta_color="normal" if coin_details['Signal']=="NEUTRAL" else "inverse")
+                c4.metric("MACD", coin_details['Trend (MACD)'])
+                c5.metric("Funding", coin_details['Funding'])
             
             # Render Plotly Chart
             plot_chart(client, selected_coin, TIMEFRAME, MARKET_TYPE)
