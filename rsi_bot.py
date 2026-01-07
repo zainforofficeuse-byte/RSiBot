@@ -6,11 +6,13 @@ import ta
 import time
 import requests
 from datetime import datetime
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Auto-Trader",
-    page_icon="🤖",
+    page_title="Binance RSI Auto-Trader 2.0",
+    page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded" 
 )
@@ -25,16 +27,22 @@ hide_st_style = """
             """
 st.markdown(hide_st_style, unsafe_allow_html=True)
 
+# --- SESSION STATE INITIALIZATION (Memory) ---
+if 'scan_results' not in st.session_state:
+    st.session_state.scan_results = []
+if 'scan_performed' not in st.session_state:
+    st.session_state.scan_performed = False
+
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Bot Settings")
+st.sidebar.title("⚙️ Bot Settings 2.0")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
 MARKET_TYPE = st.sidebar.radio("Market Type", ["Spot", "Futures"], horizontal=True)
 USE_US_BINANCE = st.sidebar.checkbox("Use Binance.US", value=False)
 
-with st.sidebar.expander("🔐 API Keys (Optional)", expanded=True):
-    st.info("Keys sirf data limits barhane ke liye hain. Real Trading disabled hai.")
+with st.sidebar.expander("🔐 API Keys (Optional)", expanded=False):
+    st.info("Keys sirf data limits barhane ke liye hain.")
     USER_API_KEY = st.text_input("API Key", type="password")
     USER_API_SECRET = st.text_input("API Secret", type="password")
 
@@ -42,15 +50,14 @@ PROXY_URL = st.sidebar.text_input("Proxy URL (Optional)", placeholder="http://us
 
 st.sidebar.divider()
 
-# 2. AUTO TRADING SECTION (SIMULATION ONLY)
+# 2. AUTO TRADING SECTION
 st.sidebar.subheader("🤖 Auto Trading (Simulation)")
-ENABLE_AUTOTRADE = st.sidebar.checkbox("Enable Paper Trading (Test Mode)", value=False)
+ENABLE_AUTOTRADE = st.sidebar.checkbox("Enable Paper Trading", value=False)
 
 if ENABLE_AUTOTRADE:
     col_t1, col_t2 = st.sidebar.columns(2)
     TRADE_AMOUNT_USDT = col_t1.number_input("Simulated Amount ($)", min_value=10.0, value=15.0)
-    MAX_OPEN_TRADES = col_t2.number_input("Max Trades per Scan", min_value=1, value=3)
-    st.sidebar.info(f"ℹ️ Sirf Testing hogi. Asli paisay nahi lagenge.")
+    MAX_OPEN_TRADES = col_t2.number_input("Max Trades", min_value=1, value=3)
 
 st.sidebar.divider()
 
@@ -102,11 +109,9 @@ def init_client(use_us, proxy, api_key, api_secret):
     args = {}
     if use_us: args['tld'] = 'us'
     if proxy: args['requests_params'] = {'proxies': {'http': proxy, 'https': proxy}}
-    
     if api_key and api_secret:
         args['api_key'] = api_key
         args['api_secret'] = api_secret
-        
     return Client(**args)
 
 def get_tf_in_minutes(tf_str):
@@ -114,10 +119,6 @@ def get_tf_in_minutes(tf_str):
     return mapping.get(tf_str, 240)
 
 def place_order_simulation(symbol, side, amount_usdt, price):
-    """
-    Sirf Simulation Order generate karta hai.
-    Real trading logic completely removed.
-    """
     qty = amount_usdt / price
     return {
         "symbol": symbol,
@@ -139,36 +140,79 @@ def get_data_with_rsi(client, symbol, tf, market_type, limit=500):
         df = pd.DataFrame(klines, columns=[
             'time','open','high','low','close','volume','close_time','qav','num_trades','tbv','tqv','ignore'
         ])
+        df['time'] = pd.to_datetime(df['time'], unit='ms') # Date format fix for charts
+        df['open'] = df['open'].astype(float)
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
         df['close'] = df['close'].astype(float)
+        df['volume'] = df['volume'].astype(float)
+        
+        # Calculate RSI
         df['rsi'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
+        
+        # Calculate RVOL
+        df['vol_sma'] = df['volume'].rolling(window=20).mean()
+        df['rvol'] = df['volume'] / df['vol_sma']
+        
         return df
     except:
         return None
 
+def plot_chart(client, symbol, tf, market_type):
+    with st.spinner(f"Loading Chart for {symbol}..."):
+        df = get_data_with_rsi(client, symbol, tf, market_type, limit=150)
+        if df is None:
+            st.error("Could not load chart data.")
+            return
+
+        # Create Subplots (Price + RSI)
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                            vertical_spacing=0.05, 
+                            subplot_titles=(f'{symbol} Price Action', 'RSI (14)'),
+                            row_width=[0.3, 0.7])
+
+        # Candlestick
+        fig.add_trace(go.Candlestick(x=df['time'],
+                        open=df['open'], high=df['high'],
+                        low=df['low'], close=df['close'], name='Price'), row=1, col=1)
+
+        # RSI Line
+        fig.add_trace(go.Scatter(x=df['time'], y=df['rsi'], name='RSI', line=dict(color='purple', width=2)), row=2, col=1)
+
+        # RSI Zones (70/30)
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+        
+        # Layout Styling
+        fig.update_layout(xaxis_rangeslider_visible=False, height=600, template="plotly_dark")
+        
+        st.plotly_chart(fig, use_container_width=True)
+
+
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance RSI Scanner ({MARKET_TYPE})")
+st.title(f"🤖 Binance RSI Scanner 2.0")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
 
-# Trading Status Bar
-if ENABLE_AUTOTRADE:
-    st.info(f"🔵 **SIMULATION MODE ACTIVE:** Bot will 'pretend' to buy coins. (Max {MAX_OPEN_TRADES} trades)")
-else:
-    st.markdown("**Status:** 🟢 Scanner Only")
+# --- INITIALIZE CLIENT ---
+try:
+    client = init_client(USE_US_BINANCE, PROXY_URL, USER_API_KEY, USER_API_SECRET)
+except Exception as e:
+    st.error(f"❌ Connection Error: {e}")
+    st.stop()
 
-# Button
-btn_label = "🔄 Scan & Simulate" if ENABLE_AUTOTRADE else "🔄 Start Scanner"
+
+# --- SCAN BUTTON ---
+btn_label = "🔄 Scan & Simulate" if ENABLE_AUTOTRADE else "🔄 Start New Scan"
 
 if st.button(btn_label, type="primary"):
     
+    st.session_state.scan_results = [] # Clear old results
+    st.session_state.scan_performed = False
+
     if USE_US_BINANCE and MARKET_TYPE == "Futures":
         st.error("❌ Binance.US does not support Futures."); st.stop()
-
-    try:
-        client = init_client(USE_US_BINANCE, PROXY_URL, USER_API_KEY, USER_API_SECRET)
-    except Exception as e:
-        st.error(f"❌ Connection/Auth Error: {e}"); st.stop()
 
     status_text = st.empty()
     progress_bar = st.progress(0)
@@ -176,30 +220,22 @@ if st.button(btn_label, type="primary"):
     try:
         status_text.text(f"Fetching {MARKET_TYPE} pairs...")
         
-        # --- 1. Fetch Symbols & Funding Rates (If Futures) ---
         funding_map = {}
-        
         if MARKET_TYPE == "Spot": 
             exchange_info = client.get_exchange_info()
         else: 
-            # Futures: Exchange Info + Funding Rates fetch karein
             exchange_info = client.futures_exchange_info()
             try:
-                status_text.text("Fetching Funding Rates...")
                 mark_prices = client.futures_mark_price()
-                # Create a dictionary for fast lookup: {'BTCUSDT': 0.0001, ...}
-                for item in mark_prices:
-                    funding_map[item['symbol']] = float(item['lastFundingRate'])
-            except Exception as e:
-                st.warning(f"Could not fetch funding rates: {e}")
+                for item in mark_prices: funding_map[item['symbol']] = float(item['lastFundingRate'])
+            except: pass
 
         symbols = [s['symbol'] for s in exchange_info['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'TRADING']
         
-        # --- 2. Candle Setup ---
+        # Candle Logic
         candles_needed = 100 
         days_to_check = REPORT_DAYS if SEARCH_MODE == "📊 All-in-One Report" else 0
         if SEARCH_MODE == "Sustained Trend (Days)": days_to_check = SUSTAINED_DAYS
-
         if days_to_check > 0:
             tf_minutes = get_tf_in_minutes(TIMEFRAME)
             candles_needed = int((days_to_check * 1440) / tf_minutes) + 20
@@ -207,7 +243,6 @@ if st.button(btn_label, type="primary"):
         alerts = []
         trades_executed = 0
         trade_logs = []
-
         total_symbols = len(symbols)
         
         for i, symbol in enumerate(symbols):
@@ -220,13 +255,11 @@ if st.button(btn_label, type="primary"):
                 curr_rsi = df['rsi'].iloc[-1]
                 prev_rsi = df['rsi'].iloc[-2]
                 curr_price = df['close'].iloc[-1]
+                curr_rvol = df['rvol'].iloc[-1]
                 
-                # Funding Rate Logic
                 funding_rate_display = "N/A"
                 if MARKET_TYPE == "Futures" and symbol in funding_map:
-                    fr = funding_map[symbol]
-                    # Display as percentage (e.g., 0.0100%)
-                    funding_rate_display = f"{fr * 100:.4f}%"
+                    funding_rate_display = f"{funding_map[symbol] * 100:.4f}%"
 
                 match_found = False
                 status_msg = ""
@@ -234,12 +267,10 @@ if st.button(btn_label, type="primary"):
                 
                 # --- LOGIC SELECTION ---
                 if SEARCH_MODE == "📊 All-in-One Report":
-                    # Priority for Trading: OVERSOLD (Buy)
                     if curr_rsi <= OVERSOLD_VAL:
                          match_found = True; status_msg = "Oversold Zone"; signal_type = "BUY"
                     elif prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL:
                          match_found = True; status_msg = "📉 BREAKDOWN (Buy Dip)"; signal_type = "BUY"
-                    # Just for reporting
                     elif curr_rsi >= OVERBOUGHT_VAL:
                          match_found = True; status_msg = "Overbought Zone"; signal_type = "SELL"
                 
@@ -248,8 +279,7 @@ if st.button(btn_label, type="primary"):
                         if prev_rsi > RSI_ALERT_LEVEL and curr_rsi <= RSI_ALERT_LEVEL:
                             match_found = True; status_msg = "CROSS BELOW"; signal_type = "BUY"
                 
-                # --- AUTO TRADE EXECUTION (SIMULATION) ---
-                trade_result = None
+                # --- AUTO TRADE SIMULATION ---
                 if match_found and ENABLE_AUTOTRADE and trades_executed < MAX_OPEN_TRADES:
                     if signal_type == "BUY":
                         st.toast(f"⚡ Simulating BUY {symbol}...")
@@ -263,30 +293,70 @@ if st.button(btn_label, type="primary"):
                         "Symbol": symbol,
                         "Price": curr_price,
                         "RSI": round(curr_rsi, 2),
+                        "RVOL": round(curr_rvol, 2),
                         "Signal": signal_type,
-                        "Funding Rate": funding_rate_display, # New Column
+                        "Funding": funding_rate_display,
                         "Status": status_msg
                     })
-                    
-            if ENABLE_AUTOTRADE and trades_executed >= MAX_OPEN_TRADES:
-                status_text.warning(f"🛑 Max simulation trades ({MAX_OPEN_TRADES}) reached.")
-                break
+            
+            # Limit trades per scan
+            if ENABLE_AUTOTRADE and trades_executed >= MAX_OPEN_TRADES: break
 
         progress_bar.empty()
         status_text.success(f"✅ Scan Complete!")
         
-        # Display Trades
-        if trade_logs:
-            st.subheader(f"📜 Simulation Log")
-            st.json(trade_logs)
-
-        # Display Scan Results
-        if alerts:
-            st.subheader("📊 Scan Results")
-            df_results = pd.DataFrame(alerts)
-            st.dataframe(df_results, use_container_width=True)
-        else:
-            st.warning("No signals found.")
+        # Store results in Session State
+        st.session_state.scan_results = alerts
+        st.session_state.trade_logs = trade_logs
+        st.session_state.scan_performed = True
             
     except Exception as e:
         st.error(f"Error: {e}")
+
+
+# --- DISPLAY RESULTS & CHARTS (Outside Button Loop) ---
+
+if st.session_state.scan_performed:
+    
+    alerts = st.session_state.scan_results
+    
+    if not alerts:
+        st.warning("No signals found in the last scan.")
+    else:
+        # --- SIDEBAR COIN SELECTOR ---
+        st.sidebar.divider()
+        st.sidebar.subheader("📊 Chart Visualizer")
+        
+        # Extract symbol list from results
+        coin_list = [item['Symbol'] for item in alerts]
+        selected_coin = st.sidebar.selectbox("Select Coin to View:", coin_list)
+        
+        # --- MAIN DISPLAY TABS ---
+        tab1, tab2 = st.tabs(["📋 Scan Report", "📈 Chart Analysis"])
+        
+        with tab1:
+            st.subheader(f"Found {len(alerts)} Signals")
+            df_results = pd.DataFrame(alerts)
+            st.dataframe(df_results, use_container_width=True)
+            
+            if 'trade_logs' in st.session_state and st.session_state.trade_logs:
+                st.divider()
+                st.subheader("📜 Simulation Log")
+                st.json(st.session_state.trade_logs)
+
+        with tab2:
+            st.subheader(f"{selected_coin} Analysis ({TIMEFRAME})")
+            
+            # Find details of selected coin from alerts
+            coin_details = next((item for item in alerts if item['Symbol'] == selected_coin), None)
+            
+            if coin_details:
+                # Top Metrics
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Price", f"${coin_details['Price']}")
+                c2.metric("RSI", coin_details['RSI'])
+                c3.metric("RVOL", coin_details['RVOL'])
+                c4.metric("Signal", coin_details['Signal'], delta_color="normal" if coin_details['Signal']=="NEUTRAL" else "inverse")
+            
+            # Render Plotly Chart
+            plot_chart(client, selected_coin, TIMEFRAME, MARKET_TYPE)
