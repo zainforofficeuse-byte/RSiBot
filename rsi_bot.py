@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Auto-Trader 2.6",
+    page_title="Binance RSI Auto-Trader 2.7",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded" 
@@ -35,7 +35,7 @@ if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Bot Settings 2.6")
+st.sidebar.title("⚙️ Bot Settings 2.7")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
@@ -77,7 +77,7 @@ st.sidebar.divider()
 st.sidebar.subheader("🔍 Strategy")
 SEARCH_MODE = st.sidebar.radio(
     "Select Strategy:",
-    ["📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)"]
+    ["📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)"]
 )
 
 if SEARCH_MODE == "Crossover Alert":
@@ -99,6 +99,8 @@ elif SEARCH_MODE == "📊 All-in-One Report":
     OVERBOUGHT_VAL = col1.number_input("Overbought (>)", 50, 100, 70)
     OVERSOLD_VAL = col2.number_input("Oversold (<)", 1, 50, 30)
     REPORT_DAYS = st.sidebar.number_input("Sustained Trend Days", 1, 10, 3)
+elif SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
+    st.sidebar.info("🔎 Finds coins where Funding Rate changed sign (+/-) in the last 3 days.")
 
 TIMEFRAME_OPTIONS = {
     "15 Minutes": Client.KLINE_INTERVAL_15MINUTE,
@@ -134,7 +136,6 @@ def play_sound_alert():
     st.markdown(sound_html, unsafe_allow_html=True)
 
 def send_to_google_sheet(data, url):
-    """Sends JSON data to Google Apps Script Webhook"""
     try:
         response = requests.post(url, json=data)
         if response.status_code == 200:
@@ -189,28 +190,50 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=500):
         return None
 
 def check_funding_flip(client, symbol):
-    """
-    Checks if funding rate flipped and calculates the interval (1h, 4h, 8h).
-    """
     try:
         rates = client.futures_funding_rate(symbol=symbol, limit=2)
         if len(rates) < 2: return None
-        
         curr = float(rates[-1]['fundingRate'])
         prev = float(rates[-2]['fundingRate'])
+        flip_ts = rates[-1]['fundingTime']
+        flip_time = datetime.utcfromtimestamp(flip_ts / 1000).strftime('%H:%M UTC')
         
-        # Calculate Interval (Time Diff between last two rates)
-        ts_current = rates[-1]['fundingTime']
-        ts_prev = rates[-2]['fundingTime']
-        interval_hours = int((ts_current - ts_prev) / (1000 * 60 * 60))
-        interval_str = f"{interval_hours}h"
+        if prev < 0 and curr > 0: return f"Flip Pos 🟢 {flip_time}"
+        if prev > 0 and curr < 0: return f"Flip Neg 🔴 {flip_time}"
+        return None
+    except:
+        return None
+
+def get_historical_funding_flip(client, symbol, days=3):
+    """
+    Checks for ANY funding rate flip in the last X days.
+    Returns details if found.
+    """
+    try:
+        # Fetching enough history (3 days * 24 hours assuming worst case 1h intervals = ~72)
+        rates = client.futures_funding_rate(symbol=symbol, limit=100) 
+        if not rates or len(rates) < 2: return None
         
-        # Format Time (UTC)
-        flip_time = datetime.utcfromtimestamp(ts_current / 1000).strftime('%H:%M UTC')
+        cutoff_time = time.time() * 1000 - (days * 24 * 60 * 60 * 1000)
         
-        # Check Flip Condition
-        if prev < 0 and curr > 0: return f"Flip Pos 🟢 {flip_time} ({interval_str})"
-        if prev > 0 and curr < 0: return f"Flip Neg 🔴 {flip_time} ({interval_str})"
+        # Iterate from newest to oldest
+        for i in range(len(rates) - 1, 0, -1):
+            curr_rate = float(rates[i]['fundingRate'])
+            prev_rate = float(rates[i-1]['fundingRate'])
+            timestamp = rates[i]['fundingTime']
+            
+            if timestamp < cutoff_time:
+                break
+                
+            # Check sign change
+            if (prev_rate < 0 and curr_rate > 0) or (prev_rate > 0 and curr_rate < 0):
+                flip_time = datetime.utcfromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M')
+                return {
+                    "Flip Time": flip_time,
+                    "Old Funding": f"{prev_rate*100:.4f}%",
+                    "Flip Rate": f"{curr_rate*100:.4f}%",
+                    "Type": "Positive 🟢" if curr_rate > 0 else "Negative 🔴"
+                }
         return None
     except:
         return None
@@ -245,7 +268,7 @@ def plot_chart(client, symbol, tf, market_type):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance RSI Pro Bot 2.6")
+st.title(f"🤖 Binance RSI Pro Bot 2.7")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -302,6 +325,7 @@ if st.button(btn_label, type="primary"):
             progress_bar.progress((i + 1) / total_symbols)
             status_text.text(f"Scanning {i+1}/{total_symbols}: {symbol}...")
             
+            # --- 1. Basic Data (Price, RSI, MACD) ---
             df = get_data_with_indicators(client, symbol, TIMEFRAME, MARKET_TYPE, limit=max(100, candles_needed))
             
             if df is not None and len(df) > 30:
@@ -314,6 +338,7 @@ if st.button(btn_label, type="primary"):
                 curr_signal = df['macd_signal'].iloc[-1]
                 macd_trend = "BULLISH 🟢" if curr_macd > curr_signal else "BEARISH 🔴"
                 
+                # Default Funding Display
                 funding_rate_display = "N/A"
                 if MARKET_TYPE == "Futures" and symbol in funding_map:
                     fr = funding_map[symbol]
@@ -322,9 +347,30 @@ if st.button(btn_label, type="primary"):
                 match_found = False
                 status_msg = ""
                 signal_type = "NEUTRAL"
-                group_tag = "Normal" 
+                group_tag = "Normal"
                 
-                if SEARCH_MODE == "📊 All-in-One Report":
+                # --- Specific Fields for Funding Scanner ---
+                flip_time = "-"
+                old_funding = "-"
+                flip_rate = "-"
+                
+                # --- LOGIC SELECTION ---
+                if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
+                    if MARKET_TYPE == "Futures":
+                        hist_flip = get_historical_funding_flip(client, symbol, days=3)
+                        if hist_flip:
+                            match_found = True
+                            status_msg = f"Flip: {hist_flip['Type']}"
+                            signal_type = "ALERT"
+                            group_tag = "FundingFlip"
+                            # Store extra details
+                            flip_time = hist_flip['Flip Time']
+                            old_funding = hist_flip['Old Funding']
+                            flip_rate = hist_flip['Flip Rate']
+                    else:
+                        pass # Spot me funding nahi hoti
+
+                elif SEARCH_MODE == "📊 All-in-One Report":
                     if prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL:
                          match_found = True; status_msg = "📉 BREAKDOWN (Buy Dip)"; signal_type = "BUY"; group_tag = "Signal"
                     elif prev_rsi < OVERBOUGHT_VAL and curr_rsi >= OVERBOUGHT_VAL:
@@ -339,7 +385,8 @@ if st.button(btn_label, type="primary"):
                         if prev_rsi > RSI_ALERT_LEVEL and curr_rsi <= RSI_ALERT_LEVEL:
                             match_found = True; status_msg = "CROSS BELOW"; signal_type = "BUY"; group_tag="Alert"
                 
-                if match_found and MARKET_TYPE == "Futures":
+                # --- FUNDING CHANGE NOTIFICATION (Current) ---
+                if match_found and MARKET_TYPE == "Futures" and SEARCH_MODE != "💸 Funding Flip Scanner (3 Days)":
                      flip_status = check_funding_flip(client, symbol)
                      if flip_status:
                          funding_rate_display += f" ({flip_status})"
@@ -349,6 +396,7 @@ if st.button(btn_label, type="primary"):
                                  play_sound_alert()
                                  sound_triggered = True
 
+                # --- AUTO TRADE SIMULATION ---
                 if match_found and ENABLE_AUTOTRADE and trades_executed < MAX_OPEN_TRADES:
                     if signal_type == "BUY":
                         st.toast(f"⚡ Simulating BUY {symbol}...")
@@ -358,7 +406,7 @@ if st.button(btn_label, type="primary"):
                         trade_logs.append(trade_result)
 
                 if match_found:
-                    alerts.append({
+                    alert_data = {
                         "Symbol": symbol,
                         "Price": curr_price,
                         "RSI": round(curr_rsi, 2),
@@ -368,7 +416,16 @@ if st.button(btn_label, type="primary"):
                         "Funding": funding_rate_display,
                         "Status": status_msg,
                         "Group": group_tag 
-                    })
+                    }
+                    
+                    # Add extra columns only for Funding Scanner
+                    if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
+                        alert_data["Flip Time"] = flip_time
+                        alert_data["Old Funding"] = old_funding
+                        alert_data["Flip Rate"] = flip_rate
+                        alert_data["Current Funding"] = funding_rate_display # Rename for clarity
+
+                    alerts.append(alert_data)
             
             if ENABLE_AUTOTRADE and trades_executed >= MAX_OPEN_TRADES: break
 
@@ -413,7 +470,15 @@ if st.session_state.scan_performed:
                         st.success("Uploaded successfully!")
 
             df_res = pd.DataFrame(alerts)
-            if SEARCH_MODE == "📊 All-in-One Report":
+            
+            # --- SPECIAL DISPLAY FOR FUNDING SCANNER ---
+            if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
+                st.subheader("💸 Recent Funding Rate Flips")
+                # Showing specific columns for this mode
+                cols_to_show = ['Symbol', 'Price', 'Flip Time', 'Old Funding', 'Flip Rate', 'Current Funding', 'RSI', 'Trend (MACD)']
+                st.dataframe(df_res[cols_to_show], use_container_width=True)
+            
+            elif SEARCH_MODE == "📊 All-in-One Report":
                 df_sig = df_res[df_res['Group'] == 'Signal']
                 if not df_sig.empty:
                     st.subheader("⚡ Fresh Signals")
@@ -446,5 +511,7 @@ if st.session_state.scan_performed:
                 c2.metric("RSI", coin_details['RSI'])
                 c3.metric("RVOL", coin_details['RVOL'])
                 c4.metric("MACD", coin_details['Trend (MACD)'])
-                c5.metric("Funding", coin_details['Funding'])
+                # Handle Funding key depending on mode
+                funding_val = coin_details.get('Current Funding', coin_details.get('Funding', 'N/A'))
+                c5.metric("Funding", funding_val)
             plot_chart(client, selected_coin, TIMEFRAME, MARKET_TYPE)
