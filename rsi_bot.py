@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Auto-Trader 2.7",
+    page_title="Binance RSI Auto-Trader 2.8",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded" 
@@ -35,11 +35,11 @@ if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Bot Settings 2.7")
+st.sidebar.title("⚙️ Bot Settings 2.8")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
-MARKET_TYPE = st.sidebar.radio("Market Type", ["Spot", "Futures"], horizontal=True)
+MARKET_TYPE = st.sidebar.radio("Market Type", ["Spot", "Futures"], index=1, horizontal=True) # Default Futures for Funding
 USE_US_BINANCE = st.sidebar.checkbox("Use Binance.US", value=False)
 
 with st.sidebar.expander("🔐 API Keys (Optional)", expanded=False):
@@ -55,7 +55,6 @@ st.sidebar.divider()
 st.sidebar.subheader("🔔 Alerts & Exports")
 ENABLE_SOUND = st.sidebar.checkbox("🔊 Enable Sound Alerts", value=True)
 
-# Google Sheet Integration
 with st.sidebar.expander("💾 Google Sheets Setup", expanded=True):
     GSHEET_URL = st.text_input("Web App URL", placeholder="https://script.google.com/macros/s/...", help="Paste the Web App URL from Google Apps Script here.")
     AUTO_EXPORT = st.checkbox("Auto-Upload Results", value=False, help="Automatically send scan results to Google Sheet after every scan.")
@@ -75,9 +74,11 @@ st.sidebar.divider()
 
 # 4. Strategy
 st.sidebar.subheader("🔍 Strategy")
+# Updated Default Index to 4 (Funding Flip Scanner)
 SEARCH_MODE = st.sidebar.radio(
     "Select Strategy:",
-    ["📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)"]
+    ["📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)"],
+    index=4 
 )
 
 if SEARCH_MODE == "Crossover Alert":
@@ -100,7 +101,7 @@ elif SEARCH_MODE == "📊 All-in-One Report":
     OVERSOLD_VAL = col2.number_input("Oversold (<)", 1, 50, 30)
     REPORT_DAYS = st.sidebar.number_input("Sustained Trend Days", 1, 10, 3)
 elif SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
-    st.sidebar.info("🔎 Finds coins where Funding Rate changed sign (+/-) in the last 3 days.")
+    st.sidebar.info("🔎 Finds Funding Flips (+/-). Shows Long/Short Ratio.")
 
 TIMEFRAME_OPTIONS = {
     "15 Minutes": Client.KLINE_INTERVAL_15MINUTE,
@@ -205,38 +206,43 @@ def check_funding_flip(client, symbol):
         return None
 
 def get_historical_funding_flip(client, symbol, days=3):
-    """
-    Checks for ANY funding rate flip in the last X days.
-    Returns details if found.
-    """
     try:
-        # Fetching enough history (3 days * 24 hours assuming worst case 1h intervals = ~72)
         rates = client.futures_funding_rate(symbol=symbol, limit=100) 
         if not rates or len(rates) < 2: return None
         
         cutoff_time = time.time() * 1000 - (days * 24 * 60 * 60 * 1000)
         
-        # Iterate from newest to oldest
         for i in range(len(rates) - 1, 0, -1):
             curr_rate = float(rates[i]['fundingRate'])
             prev_rate = float(rates[i-1]['fundingRate'])
             timestamp = rates[i]['fundingTime']
             
-            if timestamp < cutoff_time:
-                break
+            if timestamp < cutoff_time: break
                 
-            # Check sign change
             if (prev_rate < 0 and curr_rate > 0) or (prev_rate > 0 and curr_rate < 0):
                 flip_time = datetime.utcfromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M')
                 return {
                     "Flip Time": flip_time,
                     "Old Funding": f"{prev_rate*100:.4f}%",
                     "Flip Rate": f"{curr_rate*100:.4f}%",
-                    "Type": "Positive 🟢" if curr_rate > 0 else "Negative 🔴"
+                    "Type": "Positive" if curr_rate > 0 else "Negative",
+                    "SortValue": curr_rate
                 }
         return None
     except:
         return None
+
+def get_long_short_ratio(client, symbol):
+    """Fetches Top Long/Short Account Ratio for 4h"""
+    try:
+        data = client.futures_top_longshort_account_ratio(symbol=symbol, period='4h', limit=1)
+        if data:
+            l_ratio = float(data[0]['longAccount']) * 100
+            s_ratio = float(data[0]['shortAccount']) * 100
+            return l_ratio, s_ratio
+        return 0, 0
+    except:
+        return 0, 0
 
 def plot_chart(client, symbol, tf, market_type):
     with st.spinner(f"Loading Chart for {symbol}..."):
@@ -245,30 +251,22 @@ def plot_chart(client, symbol, tf, market_type):
             st.error("Could not load chart data.")
             return
 
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
-                            vertical_spacing=0.05, 
-                            subplot_titles=(f'{symbol} Price', 'RSI (14)', 'MACD'),
-                            row_width=[0.2, 0.2, 0.6])
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, 
+                            subplot_titles=(f'{symbol} Price', 'RSI (14)', 'MACD'), row_width=[0.2, 0.2, 0.6])
 
-        fig.add_trace(go.Candlestick(x=df['time'],
-                        open=df['open'], high=df['high'],
-                        low=df['low'], close=df['close'], name='Price'), row=1, col=1)
-
+        fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Price'), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['time'], y=df['rsi'], name='RSI', line=dict(color='purple', width=2)), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-
         fig.add_trace(go.Scatter(x=df['time'], y=df['macd'], name='MACD', line=dict(color='blue', width=1.5)), row=3, col=1)
         fig.add_trace(go.Scatter(x=df['time'], y=df['macd_signal'], name='Signal', line=dict(color='orange', width=1.5)), row=3, col=1)
-        
         colors = ['green' if val >= 0 else 'red' for val in df['macd_diff']]
         fig.add_trace(go.Bar(x=df['time'], y=df['macd_diff'], name='Hist', marker_color=colors), row=3, col=1)
-        
         fig.update_layout(xaxis_rangeslider_visible=False, height=800, template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance RSI Pro Bot 2.7")
+st.title(f"🤖 Binance RSI Pro Bot 2.8")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -338,7 +336,6 @@ if st.button(btn_label, type="primary"):
                 curr_signal = df['macd_signal'].iloc[-1]
                 macd_trend = "BULLISH 🟢" if curr_macd > curr_signal else "BEARISH 🔴"
                 
-                # Default Funding Display
                 funding_rate_display = "N/A"
                 if MARKET_TYPE == "Futures" and symbol in funding_map:
                     fr = funding_map[symbol]
@@ -349,10 +346,12 @@ if st.button(btn_label, type="primary"):
                 signal_type = "NEUTRAL"
                 group_tag = "Normal"
                 
-                # --- Specific Fields for Funding Scanner ---
                 flip_time = "-"
                 old_funding = "-"
                 flip_rate = "-"
+                long_pct = 0.0
+                short_pct = 0.0
+                flip_type = "Neutral"
                 
                 # --- LOGIC SELECTION ---
                 if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
@@ -362,13 +361,18 @@ if st.button(btn_label, type="primary"):
                             match_found = True
                             status_msg = f"Flip: {hist_flip['Type']}"
                             signal_type = "ALERT"
-                            group_tag = "FundingFlip"
+                            flip_type = hist_flip['Type'] # Positive or Negative
+                            
                             # Store extra details
                             flip_time = hist_flip['Flip Time']
                             old_funding = hist_flip['Old Funding']
                             flip_rate = hist_flip['Flip Rate']
+                            funding_rate_display = flip_rate # Update display to current flip rate
+                            
+                            # Fetch Long/Short Ratio
+                            long_pct, short_pct = get_long_short_ratio(client, symbol)
                     else:
-                        pass # Spot me funding nahi hoti
+                        pass 
 
                 elif SEARCH_MODE == "📊 All-in-One Report":
                     if prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL:
@@ -385,7 +389,7 @@ if st.button(btn_label, type="primary"):
                         if prev_rsi > RSI_ALERT_LEVEL and curr_rsi <= RSI_ALERT_LEVEL:
                             match_found = True; status_msg = "CROSS BELOW"; signal_type = "BUY"; group_tag="Alert"
                 
-                # --- FUNDING CHANGE NOTIFICATION (Current) ---
+                # --- FUNDING CHANGE NOTIFICATION ---
                 if match_found and MARKET_TYPE == "Futures" and SEARCH_MODE != "💸 Funding Flip Scanner (3 Days)":
                      flip_status = check_funding_flip(client, symbol)
                      if flip_status:
@@ -399,7 +403,6 @@ if st.button(btn_label, type="primary"):
                 # --- AUTO TRADE SIMULATION ---
                 if match_found and ENABLE_AUTOTRADE and trades_executed < MAX_OPEN_TRADES:
                     if signal_type == "BUY":
-                        st.toast(f"⚡ Simulating BUY {symbol}...")
                         trade_result = place_order_simulation(symbol, "BUY", TRADE_AMOUNT_USDT, curr_price)
                         status_msg += " | ✅ SIMULATED"
                         trades_executed += 1
@@ -415,15 +418,18 @@ if st.button(btn_label, type="primary"):
                         "Signal": signal_type,
                         "Funding": funding_rate_display,
                         "Status": status_msg,
-                        "Group": group_tag 
+                        "Group": group_tag,
+                        "Flip Type": flip_type # Internal Use
                     }
                     
-                    # Add extra columns only for Funding Scanner
                     if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
                         alert_data["Flip Time"] = flip_time
                         alert_data["Old Funding"] = old_funding
-                        alert_data["Flip Rate"] = flip_rate
-                        alert_data["Current Funding"] = funding_rate_display # Rename for clarity
+                        alert_data["Current Funding"] = flip_rate
+                        alert_data["Long %"] = f"{long_pct:.1f}%"
+                        alert_data["Short %"] = f"{short_pct:.1f}%"
+                        alert_data["_long_val"] = long_pct # Hidden for logic
+                        alert_data["_short_val"] = short_pct # Hidden for logic
 
                     alerts.append(alert_data)
             
@@ -432,13 +438,8 @@ if st.button(btn_label, type="primary"):
         progress_bar.empty()
         status_text.success(f"✅ Scan Complete!")
         
-        # --- GOOGLE SHEET EXPORT ---
         if alerts and GSHEET_URL and AUTO_EXPORT:
-            status_text.text("Uploading to Google Sheet...")
-            if send_to_google_sheet(alerts, GSHEET_URL):
-                st.toast("✅ Data uploaded to Google Sheet!", icon="💾")
-            else:
-                st.toast("❌ Google Sheet Upload Failed", icon="⚠️")
+            if send_to_google_sheet(alerts, GSHEET_URL): st.toast("✅ Google Sheet Updated!")
 
         st.session_state.scan_results = alerts
         st.session_state.trade_logs = trade_logs
@@ -448,6 +449,24 @@ if st.button(btn_label, type="primary"):
         st.error(f"Error: {e}")
 
 # --- DISPLAY RESULTS & CHARTS ---
+def highlight_ls(row):
+    """Highlights the larger Long or Short value in Orange"""
+    styles = [''] * len(row)
+    try:
+        l_val = row['_long_val']
+        s_val = row['_short_val']
+        
+        # Find column indices (assuming names match dataframe columns)
+        l_idx = row.index.get_loc("Long %")
+        s_idx = row.index.get_loc("Short %")
+        
+        if l_val > s_val:
+            styles[l_idx] = 'color: orange; font-weight: bold'
+        elif s_val > l_val:
+            styles[s_idx] = 'color: orange; font-weight: bold'
+    except: pass
+    return styles
+
 if st.session_state.scan_performed:
     alerts = st.session_state.scan_results
     if not alerts:
@@ -462,40 +481,36 @@ if st.session_state.scan_performed:
         
         with tab1:
             st.subheader(f"Found {len(alerts)} Signals")
-            
-            # Manual Upload Button
-            if GSHEET_URL and not AUTO_EXPORT:
-                if st.button("💾 Upload Results to Google Sheet"):
-                    if send_to_google_sheet(alerts, GSHEET_URL):
-                        st.success("Uploaded successfully!")
-
             df_res = pd.DataFrame(alerts)
             
-            # --- SPECIAL DISPLAY FOR FUNDING SCANNER ---
             if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
-                st.subheader("💸 Recent Funding Rate Flips")
-                # Showing specific columns for this mode
-                cols_to_show = ['Symbol', 'Price', 'Flip Time', 'Old Funding', 'Flip Rate', 'Current Funding', 'RSI', 'Trend (MACD)']
-                st.dataframe(df_res[cols_to_show], use_container_width=True)
-            
+                cols_to_show = ['Symbol', 'Price', 'Flip Time', 'Old Funding', 'Current Funding', 'Long %', 'Short %', 'Trend (MACD)', '_long_val', '_short_val', 'Flip Type']
+                # Filter columns that exist
+                cols_to_show = [c for c in cols_to_show if c in df_res.columns]
+                
+                # Separate Sections
+                df_pos = df_res[df_res['Flip Type'] == "Positive"]
+                df_neg = df_res[df_res['Flip Type'] == "Negative"]
+                
+                if not df_pos.empty:
+                    st.subheader("🟢 Positive Funding (Flipped +)")
+                    st.dataframe(df_pos[cols_to_show].drop(columns=['_long_val', '_short_val', 'Flip Type']).style.apply(highlight_ls, axis=1), use_container_width=True)
+                
+                if not df_neg.empty:
+                    st.subheader("🔴 Negative Funding (Flipped -)")
+                    st.dataframe(df_neg[cols_to_show].drop(columns=['_long_val', '_short_val', 'Flip Type']).style.apply(highlight_ls, axis=1), use_container_width=True)
+                
             elif SEARCH_MODE == "📊 All-in-One Report":
                 df_sig = df_res[df_res['Group'] == 'Signal']
                 if not df_sig.empty:
-                    st.subheader("⚡ Fresh Signals")
-                    st.dataframe(df_sig.drop(columns=['Group']), use_container_width=True)
-
+                    st.subheader("⚡ Fresh Signals"); st.dataframe(df_sig.drop(columns=['Group']), use_container_width=True)
                 df_os = df_res[df_res['Group'] == 'Oversold']
                 if not df_os.empty:
-                    st.subheader(f"🟢 Oversold (< {OVERSOLD_VAL})")
-                    st.dataframe(df_os.drop(columns=['Group']).sort_values("RSI"), use_container_width=True)
-
+                    st.subheader(f"🟢 Oversold"); st.dataframe(df_os.drop(columns=['Group']).sort_values("RSI"), use_container_width=True)
                 df_ob = df_res[df_res['Group'] == 'Overbought']
                 if not df_ob.empty:
-                    st.subheader(f"🔴 Overbought (> {OVERBOUGHT_VAL})")
-                    st.dataframe(df_ob.drop(columns=['Group']).sort_values("RSI", ascending=False), use_container_width=True)
-                
-                if df_sig.empty and df_os.empty and df_ob.empty:
-                    st.dataframe(df_res.drop(columns=['Group']), use_container_width=True)
+                    st.subheader(f"🔴 Overbought"); st.dataframe(df_ob.drop(columns=['Group']).sort_values("RSI", ascending=False), use_container_width=True)
+                if df_sig.empty and df_os.empty and df_ob.empty: st.dataframe(df_res.drop(columns=['Group']), use_container_width=True)
             else:
                 st.dataframe(df_res.drop(columns=['Group']), use_container_width=True)
             
@@ -511,7 +526,6 @@ if st.session_state.scan_performed:
                 c2.metric("RSI", coin_details['RSI'])
                 c3.metric("RVOL", coin_details['RVOL'])
                 c4.metric("MACD", coin_details['Trend (MACD)'])
-                # Handle Funding key depending on mode
                 funding_val = coin_details.get('Current Funding', coin_details.get('Funding', 'N/A'))
                 c5.metric("Funding", funding_val)
             plot_chart(client, selected_coin, TIMEFRAME, MARKET_TYPE)
