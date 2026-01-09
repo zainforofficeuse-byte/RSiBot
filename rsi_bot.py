@@ -9,11 +9,12 @@ import json
 from datetime import datetime
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import concurrent.futures # Added for Multithreading
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Auto-Trader 2.8",
-    page_icon="📈",
+    page_title="Binance RSI Pro Scanner 2.9",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded" 
 )
@@ -35,7 +36,7 @@ if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Bot Settings 2.8")
+st.sidebar.title("⚙️ Scanner Settings 2.9")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
@@ -61,18 +62,7 @@ with st.sidebar.expander("💾 Google Sheets Setup", expanded=True):
 
 st.sidebar.divider()
 
-# 3. AUTO TRADING
-st.sidebar.subheader("🤖 Auto Trading (Simulation)")
-ENABLE_AUTOTRADE = st.sidebar.checkbox("Enable Paper Trading", value=False)
-
-if ENABLE_AUTOTRADE:
-    col_t1, col_t2 = st.sidebar.columns(2)
-    TRADE_AMOUNT_USDT = col_t1.number_input("Simulated Amount ($)", min_value=10.0, value=15.0)
-    MAX_OPEN_TRADES = col_t2.number_input("Max Trades", min_value=1, value=3)
-
-st.sidebar.divider()
-
-# 4. Strategy
+# 3. Strategy
 st.sidebar.subheader("🔍 Strategy")
 # Updated Default Index to 4 (Funding Flip Scanner)
 SEARCH_MODE = st.sidebar.radio(
@@ -82,10 +72,10 @@ SEARCH_MODE = st.sidebar.radio(
 )
 
 if SEARCH_MODE == "Crossover Alert":
-    st.sidebar.info("🔔 Buy when RSI crosses BELOW level.")
+    st.sidebar.info("🔔 Alert when RSI crosses BELOW level.")
     RSI_ALERT_LEVEL = st.sidebar.number_input("RSI Cross Level", 1, 100, 30)
 elif SEARCH_MODE == "RSI Range":
-    st.sidebar.info("↔️ Trade coins inside a range.")
+    st.sidebar.info("↔️ Show coins inside a specific RSI Range.")
     col1, col2 = st.sidebar.columns(2)
     MIN_RSI = col1.number_input("Min RSI", 1, 100, 70)
     MAX_RSI = col2.number_input("Max RSI", 1, 100, 90)
@@ -95,7 +85,7 @@ elif SEARCH_MODE == "Sustained Trend (Days)":
     TREND_TYPE = st.sidebar.selectbox("Condition", ["Always ABOVE", "Always BELOW"])
     TREND_RSI_LEVEL = st.sidebar.number_input("RSI Threshold", 1, 100, 70)
 elif SEARCH_MODE == "📊 All-in-One Report":
-    st.sidebar.info("📑 Auto-Trade primarily on OVERSOLD signals.")
+    st.sidebar.info("📑 Analyze Market for Signals, Overbought & Oversold.")
     col1, col2 = st.sidebar.columns(2)
     OVERBOUGHT_VAL = col1.number_input("Overbought (>)", 50, 100, 70)
     OVERSOLD_VAL = col2.number_input("Oversold (<)", 1, 50, 30)
@@ -147,18 +137,6 @@ def send_to_google_sheet(data, url):
     except Exception as e:
         st.error(f"Failed to upload to Sheet: {e}")
         return False
-
-def place_order_simulation(symbol, side, amount_usdt, price):
-    qty = amount_usdt / price
-    return {
-        "symbol": symbol,
-        "orderId": f"SIM-{int(time.time())}",
-        "status": "FILLED",
-        "type": "MARKET (PAPER)",
-        "side": side,
-        "executedQty": f"{qty:.5f}",
-        "cummulativeQuoteQty": f"{amount_usdt:.2f}"
-    }
 
 def get_data_with_indicators(client, symbol, tf, market_type, limit=500):
     try:
@@ -265,8 +243,144 @@ def plot_chart(client, symbol, tf, market_type):
         fig.update_layout(xaxis_rangeslider_visible=False, height=800, template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
 
+# --- WORKER FUNCTION FOR MULTITHREADING ---
+def analyze_symbol(symbol, client_args, scan_params):
+    """
+    Runs in a separate thread for each symbol.
+    Returns: alert_data (dict) or None
+    """
+    # Re-initialize client inside thread if needed, or rely on pass-through.
+    # Note: python-binance client is thread-safe for reading.
+    # scan_params contains: TIMEFRAME, MARKET_TYPE, SEARCH_MODE, funding_map, candles_needed etc.
+    
+    try:
+        # Unpack params
+        client = scan_params['client']
+        TIMEFRAME = scan_params['TIMEFRAME']
+        MARKET_TYPE = scan_params['MARKET_TYPE']
+        SEARCH_MODE = scan_params['SEARCH_MODE']
+        funding_map = scan_params['funding_map']
+        candles_needed = scan_params['candles_needed']
+        
+        # Strategy Params
+        RSI_ALERT_LEVEL = scan_params.get('RSI_ALERT_LEVEL', 30)
+        MIN_RSI = scan_params.get('MIN_RSI', 70)
+        MAX_RSI = scan_params.get('MAX_RSI', 90)
+        OVERBOUGHT_VAL = scan_params.get('OVERBOUGHT_VAL', 70)
+        OVERSOLD_VAL = scan_params.get('OVERSOLD_VAL', 30)
+        TREND_TYPE = scan_params.get('TREND_TYPE', "Always ABOVE")
+        TREND_RSI_LEVEL = scan_params.get('TREND_RSI_LEVEL', 70)
+
+        # 1. Fetch Data
+        df = get_data_with_indicators(client, symbol, TIMEFRAME, MARKET_TYPE, limit=max(100, candles_needed))
+        
+        if df is None or len(df) < 30: return None
+
+        curr_rsi = df['rsi'].iloc[-1]
+        prev_rsi = df['rsi'].iloc[-2]
+        curr_price = df['close'].iloc[-1]
+        curr_rvol = df['rvol'].iloc[-1]
+        curr_macd = df['macd'].iloc[-1]
+        curr_signal = df['macd_signal'].iloc[-1]
+        macd_trend = "BULLISH 🟢" if curr_macd > curr_signal else "BEARISH 🔴"
+        
+        funding_rate_display = "N/A"
+        if MARKET_TYPE == "Futures" and symbol in funding_map:
+            fr = funding_map[symbol]
+            funding_rate_display = f"{fr * 100:.4f}%"
+
+        match_found = False
+        status_msg = ""
+        signal_type = "NEUTRAL"
+        group_tag = "Normal"
+        
+        flip_time = "-"
+        old_funding = "-"
+        flip_rate = "-"
+        long_pct = 0.0
+        short_pct = 0.0
+        flip_type = "Neutral"
+        
+        # --- LOGIC SELECTION ---
+        if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
+            if MARKET_TYPE == "Futures":
+                hist_flip = get_historical_funding_flip(client, symbol, days=3)
+                if hist_flip:
+                    match_found = True
+                    status_msg = f"Flip: {hist_flip['Type']}"
+                    signal_type = "ALERT"
+                    flip_type = hist_flip['Type']
+                    flip_time = hist_flip['Flip Time']
+                    old_funding = hist_flip['Old Funding']
+                    flip_rate = hist_flip['Flip Rate']
+                    funding_rate_display = flip_rate
+                    long_pct, short_pct = get_long_short_ratio(client, symbol)
+
+        elif SEARCH_MODE == "📊 All-in-One Report":
+            if prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL:
+                    match_found = True; status_msg = "📉 BREAKDOWN (Buy Dip)"; signal_type = "BUY"; group_tag = "Signal"
+            elif prev_rsi < OVERBOUGHT_VAL and curr_rsi >= OVERBOUGHT_VAL:
+                    match_found = True; status_msg = "🚀 BREAKOUT (Pump)"; signal_type = "SELL"; group_tag = "Signal"
+            elif curr_rsi <= OVERSOLD_VAL:
+                    match_found = True; status_msg = "Oversold Zone"; signal_type = "BUY"; group_tag = "Oversold"
+            elif curr_rsi >= OVERBOUGHT_VAL:
+                    match_found = True; status_msg = "Overbought Zone"; signal_type = "SELL"; group_tag = "Overbought"
+        
+        elif SEARCH_MODE == "Crossover Alert":
+            if RSI_ALERT_LEVEL < 50:
+                if prev_rsi > RSI_ALERT_LEVEL and curr_rsi <= RSI_ALERT_LEVEL:
+                    match_found = True; status_msg = "CROSS BELOW"; signal_type = "BUY"; group_tag="Alert"
+            else:
+                if prev_rsi < RSI_ALERT_LEVEL and curr_rsi >= RSI_ALERT_LEVEL:
+                    match_found = True; status_msg = "CROSS ABOVE"; signal_type = "SELL"; group_tag="Alert"
+
+        elif SEARCH_MODE == "RSI Range":
+            if MIN_RSI <= curr_rsi <= MAX_RSI:
+                match_found = True; status_msg = f"IN RANGE ({MIN_RSI}-{MAX_RSI})"; group_tag = "Range"
+
+        elif SEARCH_MODE == "Sustained Trend (Days)":
+            # Simplified sustained check
+            relevant_rsi = df['rsi'].iloc[-(candles_needed-14):]
+            if not relevant_rsi.empty:
+                if "ABOVE" in TREND_TYPE and relevant_rsi.min() > TREND_RSI_LEVEL:
+                    match_found = True; status_msg = f"STRONG BULLISH 🔥"; group_tag = "Trend"
+                elif "BELOW" in TREND_TYPE and relevant_rsi.max() < TREND_RSI_LEVEL:
+                    match_found = True; status_msg = f"STRONG BEARISH ❄️"; group_tag = "Trend"
+
+        # --- FUNDING CHANGE NOTIFICATION (Current) ---
+        if match_found and MARKET_TYPE == "Futures" and SEARCH_MODE != "💸 Funding Flip Scanner (3 Days)":
+                flip_status = check_funding_flip(client, symbol)
+                if flip_status:
+                    funding_rate_display += f" ({flip_status})"
+                    # Note: Sound alert logic will be handled in main thread to avoid spam
+
+        if match_found:
+            return {
+                "Symbol": symbol,
+                "Price": curr_price,
+                "RSI": round(curr_rsi, 2),
+                "RVOL": round(curr_rvol, 2),
+                "Trend (MACD)": macd_trend, 
+                "Signal": signal_type,
+                "Funding": funding_rate_display,
+                "Status": status_msg,
+                "Group": group_tag,
+                "Flip Type": flip_type,
+                "Flip Time": flip_time,
+                "Old Funding": old_funding,
+                "Current Funding": flip_rate if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)" else funding_rate_display,
+                "Long %": f"{long_pct:.1f}%",
+                "Short %": f"{short_pct:.1f}%",
+                "_long_val": long_pct,
+                "_short_val": short_pct,
+                "has_funding_flip_alert": "Flip" in funding_rate_display # Helper for sound
+            }
+        return None
+    except:
+        return None
+
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance RSI Pro Bot 2.8")
+st.title(f"🤖 Binance RSI Pro Scanner 2.9 (Fast ⚡)")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -278,9 +392,7 @@ except Exception as e:
     st.stop()
 
 # --- SCAN BUTTON ---
-btn_label = "🔄 Scan & Simulate" if ENABLE_AUTOTRADE else "🔄 Start New Scan"
-
-if st.button(btn_label, type="primary"):
+if st.button("🔄 Start New Scan", type="primary"):
     
     st.session_state.scan_results = []
     st.session_state.scan_performed = False
@@ -306,6 +418,7 @@ if st.button(btn_label, type="primary"):
 
         symbols = [s['symbol'] for s in exchange_info['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'TRADING']
         
+        # Candle Logic
         candles_needed = 100 
         days_to_check = REPORT_DAYS if SEARCH_MODE == "📊 All-in-One Report" else 0
         if SEARCH_MODE == "Sustained Trend (Days)": days_to_check = SUSTAINED_DAYS
@@ -314,135 +427,61 @@ if st.button(btn_label, type="primary"):
             candles_needed = int((days_to_check * 1440) / tf_minutes) + 30 
 
         alerts = []
-        trades_executed = 0
-        trade_logs = []
         total_symbols = len(symbols)
         sound_triggered = False
+        
+        # Prepare Scan Parameters
+        scan_params = {
+            'client': client,
+            'TIMEFRAME': TIMEFRAME,
+            'MARKET_TYPE': MARKET_TYPE,
+            'SEARCH_MODE': SEARCH_MODE,
+            'funding_map': funding_map,
+            'candles_needed': candles_needed,
+            # Configs
+            'RSI_ALERT_LEVEL': locals().get('RSI_ALERT_LEVEL', 30),
+            'MIN_RSI': locals().get('MIN_RSI', 70),
+            'MAX_RSI': locals().get('MAX_RSI', 90),
+            'OVERBOUGHT_VAL': locals().get('OVERBOUGHT_VAL', 70),
+            'OVERSOLD_VAL': locals().get('OVERSOLD_VAL', 30),
+            'TREND_TYPE': locals().get('TREND_TYPE', "Always ABOVE"),
+            'TREND_RSI_LEVEL': locals().get('TREND_RSI_LEVEL', 70)
+        }
 
-        for i, symbol in enumerate(symbols):
-            progress_bar.progress((i + 1) / total_symbols)
-            status_text.text(f"Scanning {i+1}/{total_symbols}: {symbol}...")
+        # --- MULTITHREADED SCANNING ---
+        status_text.text(f"Scanning {total_symbols} coins (Parallel Mode)...")
+        
+        # Use ThreadPoolExecutor to run scans in parallel
+        # Max workers = 10 (Safe limit for Binance API to avoid bans)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            # Submit all tasks
+            future_to_symbol = {executor.submit(analyze_symbol, sym, {}, scan_params): sym for sym in symbols}
             
-            # --- 1. Basic Data (Price, RSI, MACD) ---
-            df = get_data_with_indicators(client, symbol, TIMEFRAME, MARKET_TYPE, limit=max(100, candles_needed))
-            
-            if df is not None and len(df) > 30:
-                curr_rsi = df['rsi'].iloc[-1]
-                prev_rsi = df['rsi'].iloc[-2]
-                curr_price = df['close'].iloc[-1]
-                curr_rvol = df['rvol'].iloc[-1]
+            completed_count = 0
+            for future in concurrent.futures.as_completed(future_to_symbol):
+                completed_count += 1
+                progress = completed_count / total_symbols
+                progress_bar.progress(progress)
                 
-                curr_macd = df['macd'].iloc[-1]
-                curr_signal = df['macd_signal'].iloc[-1]
-                macd_trend = "BULLISH 🟢" if curr_macd > curr_signal else "BEARISH 🔴"
-                
-                funding_rate_display = "N/A"
-                if MARKET_TYPE == "Futures" and symbol in funding_map:
-                    fr = funding_map[symbol]
-                    funding_rate_display = f"{fr * 100:.4f}%"
-
-                match_found = False
-                status_msg = ""
-                signal_type = "NEUTRAL"
-                group_tag = "Normal"
-                
-                flip_time = "-"
-                old_funding = "-"
-                flip_rate = "-"
-                long_pct = 0.0
-                short_pct = 0.0
-                flip_type = "Neutral"
-                
-                # --- LOGIC SELECTION ---
-                if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
-                    if MARKET_TYPE == "Futures":
-                        hist_flip = get_historical_funding_flip(client, symbol, days=3)
-                        if hist_flip:
-                            match_found = True
-                            status_msg = f"Flip: {hist_flip['Type']}"
-                            signal_type = "ALERT"
-                            flip_type = hist_flip['Type'] # Positive or Negative
-                            
-                            # Store extra details
-                            flip_time = hist_flip['Flip Time']
-                            old_funding = hist_flip['Old Funding']
-                            flip_rate = hist_flip['Flip Rate']
-                            funding_rate_display = flip_rate # Update display to current flip rate
-                            
-                            # Fetch Long/Short Ratio
-                            long_pct, short_pct = get_long_short_ratio(client, symbol)
-                    else:
-                        pass 
-
-                elif SEARCH_MODE == "📊 All-in-One Report":
-                    if prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL:
-                         match_found = True; status_msg = "📉 BREAKDOWN (Buy Dip)"; signal_type = "BUY"; group_tag = "Signal"
-                    elif prev_rsi < OVERBOUGHT_VAL and curr_rsi >= OVERBOUGHT_VAL:
-                         match_found = True; status_msg = "🚀 BREAKOUT (Pump)"; signal_type = "SELL"; group_tag = "Signal"
-                    elif curr_rsi <= OVERSOLD_VAL:
-                         match_found = True; status_msg = "Oversold Zone"; signal_type = "BUY"; group_tag = "Oversold"
-                    elif curr_rsi >= OVERBOUGHT_VAL:
-                         match_found = True; status_msg = "Overbought Zone"; signal_type = "SELL"; group_tag = "Overbought"
-                
-                elif SEARCH_MODE == "Crossover Alert":
-                    if RSI_ALERT_LEVEL < 50:
-                        if prev_rsi > RSI_ALERT_LEVEL and curr_rsi <= RSI_ALERT_LEVEL:
-                            match_found = True; status_msg = "CROSS BELOW"; signal_type = "BUY"; group_tag="Alert"
-                
-                # --- FUNDING CHANGE NOTIFICATION ---
-                if match_found and MARKET_TYPE == "Futures" and SEARCH_MODE != "💸 Funding Flip Scanner (3 Days)":
-                     flip_status = check_funding_flip(client, symbol)
-                     if flip_status:
-                         funding_rate_display += f" ({flip_status})"
-                         if ENABLE_SOUND:
-                             st.toast(f"💸 Funding Flip: {symbol} {flip_status}", icon="🔔")
-                             if not sound_triggered: 
-                                 play_sound_alert()
-                                 sound_triggered = True
-
-                # --- AUTO TRADE SIMULATION ---
-                if match_found and ENABLE_AUTOTRADE and trades_executed < MAX_OPEN_TRADES:
-                    if signal_type == "BUY":
-                        trade_result = place_order_simulation(symbol, "BUY", TRADE_AMOUNT_USDT, curr_price)
-                        status_msg += " | ✅ SIMULATED"
-                        trades_executed += 1
-                        trade_logs.append(trade_result)
-
-                if match_found:
-                    alert_data = {
-                        "Symbol": symbol,
-                        "Price": curr_price,
-                        "RSI": round(curr_rsi, 2),
-                        "RVOL": round(curr_rvol, 2),
-                        "Trend (MACD)": macd_trend, 
-                        "Signal": signal_type,
-                        "Funding": funding_rate_display,
-                        "Status": status_msg,
-                        "Group": group_tag,
-                        "Flip Type": flip_type # Internal Use
-                    }
-                    
-                    if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
-                        alert_data["Flip Time"] = flip_time
-                        alert_data["Old Funding"] = old_funding
-                        alert_data["Current Funding"] = flip_rate
-                        alert_data["Long %"] = f"{long_pct:.1f}%"
-                        alert_data["Short %"] = f"{short_pct:.1f}%"
-                        alert_data["_long_val"] = long_pct # Hidden for logic
-                        alert_data["_short_val"] = short_pct # Hidden for logic
-
-                    alerts.append(alert_data)
-            
-            if ENABLE_AUTOTRADE and trades_executed >= MAX_OPEN_TRADES: break
+                try:
+                    result = future.result()
+                    if result:
+                        alerts.append(result)
+                        # Sound Alert Logic (Once per scan)
+                        if result.get("has_funding_flip_alert") and ENABLE_SOUND and not sound_triggered:
+                            play_sound_alert()
+                            sound_triggered = True
+                            st.toast(f"🔔 Funding Change: {result['Symbol']}")
+                except Exception as exc:
+                    pass # Ignore failed threads
 
         progress_bar.empty()
-        status_text.success(f"✅ Scan Complete!")
+        status_text.success(f"✅ Scan Complete! Scanned {total_symbols} coins.")
         
         if alerts and GSHEET_URL and AUTO_EXPORT:
             if send_to_google_sheet(alerts, GSHEET_URL): st.toast("✅ Google Sheet Updated!")
 
         st.session_state.scan_results = alerts
-        st.session_state.trade_logs = trade_logs
         st.session_state.scan_performed = True
             
     except Exception as e:
@@ -456,7 +495,7 @@ def highlight_ls(row):
         l_val = row['_long_val']
         s_val = row['_short_val']
         
-        # Find column indices (assuming names match dataframe columns)
+        # Find column indices
         l_idx = row.index.get_loc("Long %")
         s_idx = row.index.get_loc("Short %")
         
@@ -513,9 +552,6 @@ if st.session_state.scan_performed:
                 if df_sig.empty and df_os.empty and df_ob.empty: st.dataframe(df_res.drop(columns=['Group']), use_container_width=True)
             else:
                 st.dataframe(df_res.drop(columns=['Group']), use_container_width=True)
-            
-            if 'trade_logs' in st.session_state and st.session_state.trade_logs:
-                st.divider(); st.subheader("📜 Simulation Log"); st.json(st.session_state.trade_logs)
 
         with tab2:
             st.subheader(f"{selected_coin} Analysis ({TIMEFRAME})")
