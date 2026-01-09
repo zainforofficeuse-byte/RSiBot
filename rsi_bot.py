@@ -9,12 +9,12 @@ import json
 from datetime import datetime
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import concurrent.futures # Added for Multithreading
+import concurrent.futures 
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Pro Scanner 2.9",
-    page_icon="⚡",
+    page_title="Binance RSI Pro Scanner 3.0",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded" 
 )
@@ -36,11 +36,11 @@ if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Scanner Settings 2.9")
+st.sidebar.title("⚙️ Scanner Settings 3.0")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
-MARKET_TYPE = st.sidebar.radio("Market Type", ["Spot", "Futures"], index=1, horizontal=True) # Default Futures for Funding
+MARKET_TYPE = st.sidebar.radio("Market Type", ["Spot", "Futures"], index=1, horizontal=True) # Default Futures
 USE_US_BINANCE = st.sidebar.checkbox("Use Binance.US", value=False)
 
 with st.sidebar.expander("🔐 API Keys (Optional)", expanded=False):
@@ -64,7 +64,6 @@ st.sidebar.divider()
 
 # 3. Strategy
 st.sidebar.subheader("🔍 Strategy")
-# Updated Default Index to 4 (Funding Flip Scanner)
 SEARCH_MODE = st.sidebar.radio(
     "Select Strategy:",
     ["📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)"],
@@ -91,7 +90,7 @@ elif SEARCH_MODE == "📊 All-in-One Report":
     OVERSOLD_VAL = col2.number_input("Oversold (<)", 1, 50, 30)
     REPORT_DAYS = st.sidebar.number_input("Sustained Trend Days", 1, 10, 3)
 elif SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
-    st.sidebar.info("🔎 Finds Funding Flips (+/-). Shows Long/Short Ratio.")
+    st.sidebar.info("🔎 Finds Funding Flips with Price Change Analysis.")
 
 TIMEFRAME_OPTIONS = {
     "15 Minutes": Client.KLINE_INTERVAL_15MINUTE,
@@ -204,7 +203,8 @@ def get_historical_funding_flip(client, symbol, days=3):
                     "Old Funding": f"{prev_rate*100:.4f}%",
                     "Flip Rate": f"{curr_rate*100:.4f}%",
                     "Type": "Positive" if curr_rate > 0 else "Negative",
-                    "SortValue": curr_rate
+                    "SortValue": curr_rate,
+                    "Timestamp": timestamp # For fetching Flip Price
                 }
         return None
     except:
@@ -247,12 +247,7 @@ def plot_chart(client, symbol, tf, market_type):
 def analyze_symbol(symbol, client_args, scan_params):
     """
     Runs in a separate thread for each symbol.
-    Returns: alert_data (dict) or None
     """
-    # Re-initialize client inside thread if needed, or rely on pass-through.
-    # Note: python-binance client is thread-safe for reading.
-    # scan_params contains: TIMEFRAME, MARKET_TYPE, SEARCH_MODE, funding_map, candles_needed etc.
-    
     try:
         # Unpack params
         client = scan_params['client']
@@ -262,7 +257,6 @@ def analyze_symbol(symbol, client_args, scan_params):
         funding_map = scan_params['funding_map']
         candles_needed = scan_params['candles_needed']
         
-        # Strategy Params
         RSI_ALERT_LEVEL = scan_params.get('RSI_ALERT_LEVEL', 30)
         MIN_RSI = scan_params.get('MIN_RSI', 70)
         MAX_RSI = scan_params.get('MAX_RSI', 90)
@@ -301,6 +295,10 @@ def analyze_symbol(symbol, client_args, scan_params):
         short_pct = 0.0
         flip_type = "Neutral"
         
+        # New Fields
+        flip_price_val = "N/A"
+        change_pct_str = "0.00%"
+        
         # --- LOGIC SELECTION ---
         if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
             if MARKET_TYPE == "Futures":
@@ -315,6 +313,18 @@ def analyze_symbol(symbol, client_args, scan_params):
                     flip_rate = hist_flip['Flip Rate']
                     funding_rate_display = flip_rate
                     long_pct, short_pct = get_long_short_ratio(client, symbol)
+                    
+                    # --- NEW: CALCULATE FLIP PRICE & CHANGE ---
+                    try:
+                        # Fetch candle at flip time
+                        flip_kline = client.futures_klines(symbol=symbol, interval='1h', startTime=hist_flip['Timestamp'], limit=1)
+                        if flip_kline:
+                            f_price = float(flip_kline[0][1]) # Open price
+                            flip_price_val = f"{f_price}"
+                            pct_change = ((curr_price - f_price) / f_price) * 100
+                            trend_icon = "📈" if pct_change >= 0 else "📉"
+                            change_pct_str = f"{pct_change:.2f}% {trend_icon}"
+                    except: pass
 
         elif SEARCH_MODE == "📊 All-in-One Report":
             if prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL:
@@ -352,7 +362,6 @@ def analyze_symbol(symbol, client_args, scan_params):
                 flip_status = check_funding_flip(client, symbol)
                 if flip_status:
                     funding_rate_display += f" ({flip_status})"
-                    # Note: Sound alert logic will be handled in main thread to avoid spam
 
         if match_found:
             return {
@@ -373,14 +382,17 @@ def analyze_symbol(symbol, client_args, scan_params):
                 "Short %": f"{short_pct:.1f}%",
                 "_long_val": long_pct,
                 "_short_val": short_pct,
-                "has_funding_flip_alert": "Flip" in funding_rate_display # Helper for sound
+                "has_funding_flip_alert": "Flip" in funding_rate_display,
+                # New Analysis Fields
+                "Flip Price": flip_price_val,
+                "Change %": change_pct_str
             }
         return None
     except:
         return None
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance RSI Pro Scanner 2.9 (Fast ⚡)")
+st.title(f"🤖 Binance RSI Pro Scanner 3.0 (Fast ⚡)")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -451,10 +463,7 @@ if st.button("🔄 Start New Scan", type="primary"):
         # --- MULTITHREADED SCANNING ---
         status_text.text(f"Scanning {total_symbols} coins (Parallel Mode)...")
         
-        # Use ThreadPoolExecutor to run scans in parallel
-        # Max workers = 10 (Safe limit for Binance API to avoid bans)
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            # Submit all tasks
             future_to_symbol = {executor.submit(analyze_symbol, sym, {}, scan_params): sym for sym in symbols}
             
             completed_count = 0
@@ -467,13 +476,12 @@ if st.button("🔄 Start New Scan", type="primary"):
                     result = future.result()
                     if result:
                         alerts.append(result)
-                        # Sound Alert Logic (Once per scan)
                         if result.get("has_funding_flip_alert") and ENABLE_SOUND and not sound_triggered:
                             play_sound_alert()
                             sound_triggered = True
                             st.toast(f"🔔 Funding Change: {result['Symbol']}")
                 except Exception as exc:
-                    pass # Ignore failed threads
+                    pass 
 
         progress_bar.empty()
         status_text.success(f"✅ Scan Complete! Scanned {total_symbols} coins.")
@@ -494,15 +502,10 @@ def highlight_ls(row):
     try:
         l_val = row['_long_val']
         s_val = row['_short_val']
-        
-        # Find column indices
         l_idx = row.index.get_loc("Long %")
         s_idx = row.index.get_loc("Short %")
-        
-        if l_val > s_val:
-            styles[l_idx] = 'color: orange; font-weight: bold'
-        elif s_val > l_val:
-            styles[s_idx] = 'color: orange; font-weight: bold'
+        if l_val > s_val: styles[l_idx] = 'color: orange; font-weight: bold'
+        elif s_val > l_val: styles[s_idx] = 'color: orange; font-weight: bold'
     except: pass
     return styles
 
@@ -523,7 +526,7 @@ if st.session_state.scan_performed:
             df_res = pd.DataFrame(alerts)
             
             if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
-                cols_to_show = ['Symbol', 'Price', 'Flip Time', 'Old Funding', 'Current Funding', 'Long %', 'Short %', 'Trend (MACD)', '_long_val', '_short_val', 'Flip Type']
+                cols_to_show = ['Symbol', 'Price', 'Flip Time', 'Flip Price', 'Change %', 'Old Funding', 'Current Funding', 'Long %', 'Short %', 'Trend (MACD)', '_long_val', '_short_val', 'Flip Type']
                 # Filter columns that exist
                 cols_to_show = [c for c in cols_to_show if c in df_res.columns]
                 
