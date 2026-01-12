@@ -13,8 +13,8 @@ import concurrent.futures
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Pro Scanner 3.2",
-    page_icon="🪤",
+    page_title="Binance Expert Scanner 4.0",
+    page_icon="💎",
     layout="wide",
     initial_sidebar_state="expanded" 
 )
@@ -36,7 +36,7 @@ if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Scanner Settings 3.2")
+st.sidebar.title("⚙️ Expert Settings 4.0")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
@@ -64,14 +64,19 @@ st.sidebar.divider()
 
 # 3. Strategy
 st.sidebar.subheader("🔍 Strategy")
+# Added "Expert Score" option
 SEARCH_MODE = st.sidebar.radio(
     "Select Strategy:",
-    ["📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)", "🪤 Trap Master (Net Positions)"],
-    index=5
+    ["💎 Expert Confluence Score", "📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)", "🪤 Trap Master (Net Positions)"],
+    index=0 # Default to Expert Score
 )
 
 # Dynamic Inputs
-if SEARCH_MODE == "Crossover Alert":
+if SEARCH_MODE == "Expert Confluence Score":
+    st.sidebar.info("🏆 Ranks coins based on a 0-100 Score using RSI, Bollinger Bands, MACD, Volume & Funding.")
+    MIN_SCORE = st.sidebar.slider("Min Score to Show", 0, 100, 60, help="Higher is stricter.")
+
+elif SEARCH_MODE == "Crossover Alert":
     st.sidebar.info("🔔 Alert when RSI crosses BELOW level.")
     RSI_ALERT_LEVEL = st.sidebar.number_input("RSI Cross Level", 1, 100, 30)
 elif SEARCH_MODE == "RSI Range":
@@ -141,9 +146,8 @@ def send_to_google_sheet(data, url):
         st.error(f"Failed to upload to Sheet: {e}")
         return False
 
-def get_data_with_indicators(client, symbol, tf, market_type, limit=100, get_oi=False):
+def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=False):
     try:
-        # 1. Get Klines
         if market_type == "Spot":
             klines = client.get_klines(symbol=symbol, interval=tf, limit=limit)
         else:
@@ -153,13 +157,10 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=100, get_oi=
             'time','open','high','low','close','volume','close_time','qav','num_trades','tbv','tqv','ignore'
         ])
         df['time'] = pd.to_datetime(df['time'], unit='ms')
-        df['open'] = df['open'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
-        df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
+        cols = ['open','high','low','close','volume']
+        df[cols] = df[cols].astype(float)
         
-        # Indicators
+        # --- BASIC INDICATORS ---
         df['rsi'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
         df['rvol'] = df['volume'] / df['vol_sma']
@@ -170,50 +171,47 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=100, get_oi=
         df['macd_signal'] = macd.macd_signal()
         df['macd_diff'] = macd.macd_diff()
 
+        # --- EXPERT INDICATORS ---
+        # 1. Bollinger Bands
+        bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
+        df['bb_upper'] = bb.bollinger_hband()
+        df['bb_lower'] = bb.bollinger_lband()
+        
+        # 2. EMA 200 (Trend Filter)
+        df['ema_200'] = ta.trend.EMAIndicator(close=df['close'], window=200).ema_indicator()
+        
+        # 3. ADX (Trend Strength)
+        adx = ta.trend.ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
+        df['adx'] = adx.adx()
+
         # 2. Get Open Interest (For Trap Master Logic)
         if get_oi and market_type == "Futures":
             try:
                 oi_data = client.futures_open_interest_hist(symbol=symbol, period=tf, limit=limit)
                 df_oi = pd.DataFrame(oi_data)
                 df_oi['sumOpenInterestValue'] = df_oi['sumOpenInterestValue'].astype(float)
-                # Align data lengths
                 min_len = min(len(df), len(df_oi))
                 df = df.iloc[-min_len:].reset_index(drop=True)
                 df_oi = df_oi.iloc[-min_len:].reset_index(drop=True)
-                
                 df['oi'] = df_oi['sumOpenInterestValue']
                 df['delta_oi'] = df['oi'].diff()
                 
-                # --- PINE SCRIPT LOGIC IMPLEMENTATION ---
-                # Conditions
+                # Net Positions Logic
                 price_up = df['close'] > df['open']
                 price_down = df['close'] < df['open']
                 oi_up = df['delta_oi'] > 0
                 oi_down = df['delta_oi'] < 0
                 
-                # Classify Moves
-                new_longs = (oi_up & price_up)
-                rekt_longs = (oi_down & price_down)
-                new_shorts = (oi_up & price_down)
-                rekt_shorts = (oi_down & price_up)
+                longs_entering = (oi_up & price_up) * df['delta_oi']
+                longs_exiting = (oi_down & price_down) * df['delta_oi']
+                shorts_entering = (oi_up & price_down) * df['delta_oi']
+                shorts_exiting = (oi_down & price_up) * df['delta_oi']
                 
-                # Calculate Values
-                longs_entering = new_longs * df['delta_oi']
-                longs_exiting = rekt_longs * df['delta_oi']
-                shorts_entering = new_shorts * df['delta_oi']
-                shorts_exiting = rekt_shorts * df['delta_oi']
-                
-                # Cumulative Net Positions
                 df['net_longs'] = (longs_entering.fillna(0) - longs_exiting.fillna(0).abs()).cumsum()
                 df['net_shorts'] = (shorts_entering.fillna(0) - shorts_exiting.fillna(0).abs()).cumsum()
-                
-                # Calculate RSI of Net Positions
                 df['nl_rsi'] = ta.momentum.RSIIndicator(close=df['net_longs'], window=14).rsi()
                 df['ns_rsi'] = ta.momentum.RSIIndicator(close=df['net_shorts'], window=14).rsi()
-                
-            except Exception:
-                df['nl_rsi'] = 50
-                df['ns_rsi'] = 50
+            except Exception: pass
         
         return df
     except:
@@ -267,35 +265,43 @@ def get_long_short_ratio(client, symbol):
 def plot_chart(client, symbol, tf, market_type):
     with st.spinner(f"Loading Chart for {symbol}..."):
         is_trap_mode = (SEARCH_MODE == "🪤 Trap Master (Net Positions)")
-        df = get_data_with_indicators(client, symbol, tf, market_type, limit=150, get_oi=is_trap_mode)
+        df = get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=is_trap_mode)
         if df is None: st.error("Could not load chart data."); return
 
-        rows = 3
-        titles = (f'{symbol} Price', 'RSI (14)', 'MACD')
+        rows = 4
+        titles = (f'{symbol} Price + Bollinger Bands', 'RSI (14)', 'MACD', 'Volume')
         
         if is_trap_mode and 'nl_rsi' in df.columns:
-            titles = (f'{symbol} Price', 'RSI (14)', 'Net Positions RSI (Green=Longs, Red=Shorts)')
+            titles = (f'{symbol} Price', 'RSI (14)', 'Net Positions RSI', 'Volume')
         
-        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.05, 
-                            subplot_titles=titles, row_width=[0.2, 0.2, 0.6])
+        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, 
+                            subplot_titles=titles, row_width=[0.15, 0.15, 0.15, 0.55])
 
+        # 1. Price + BB + EMA
         fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Price'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['time'], y=df['bb_upper'], name='BB Upper', line=dict(color='gray', width=1, dash='dot')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['time'], y=df['bb_lower'], name='BB Lower', line=dict(color='gray', width=1, dash='dot')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df['time'], y=df['ema_200'], name='EMA 200', line=dict(color='orange', width=2)), row=1, col=1)
+
+        # 2. RSI
         fig.add_trace(go.Scatter(x=df['time'], y=df['rsi'], name='RSI', line=dict(color='purple', width=2)), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
+        # 3. MACD or Net Pos
         if is_trap_mode and 'nl_rsi' in df.columns:
-            # Trap Mode Chart
             fig.add_trace(go.Scatter(x=df['time'], y=df['nl_rsi'], name='Net Long RSI', line=dict(color='#00ff00', width=2)), row=3, col=1)
             fig.add_trace(go.Scatter(x=df['time'], y=df['ns_rsi'], name='Net Short RSI', line=dict(color='#ff0000', width=2)), row=3, col=1)
-            fig.add_hline(y=80, line_dash="dot", line_color="white", row=3, col=1, annotation_text="Overcrowded")
         else:
             fig.add_trace(go.Scatter(x=df['time'], y=df['macd'], name='MACD', line=dict(color='blue', width=1.5)), row=3, col=1)
             fig.add_trace(go.Scatter(x=df['time'], y=df['macd_signal'], name='Signal', line=dict(color='orange', width=1.5)), row=3, col=1)
             colors = ['green' if val >= 0 else 'red' for val in df['macd_diff']]
             fig.add_trace(go.Bar(x=df['time'], y=df['macd_diff'], name='Hist', marker_color=colors), row=3, col=1)
         
-        fig.update_layout(xaxis_rangeslider_visible=False, height=800, template="plotly_dark")
+        # 4. Volume
+        fig.add_trace(go.Bar(x=df['time'], y=df['volume'], name='Volume', marker_color='teal'), row=4, col=1)
+
+        fig.update_layout(xaxis_rangeslider_visible=False, height=1000, template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
 
 # --- WORKER FUNCTION ---
@@ -308,6 +314,8 @@ def analyze_symbol(symbol, client_args, scan_params):
         funding_map = scan_params['funding_map']
         candles_needed = scan_params['candles_needed']
         
+        # Configs
+        MIN_SCORE = scan_params.get('MIN_SCORE', 60)
         RSI_ALERT_LEVEL = scan_params.get('RSI_ALERT_LEVEL', 30)
         MIN_RSI = scan_params.get('MIN_RSI', 70)
         MAX_RSI = scan_params.get('MAX_RSI', 90)
@@ -319,22 +327,30 @@ def analyze_symbol(symbol, client_args, scan_params):
 
         # 1. Fetch Data
         get_oi = (SEARCH_MODE == "🪤 Trap Master (Net Positions)")
-        df = get_data_with_indicators(client, symbol, TIMEFRAME, MARKET_TYPE, limit=max(100, candles_needed), get_oi=get_oi)
+        df = get_data_with_indicators(client, symbol, TIMEFRAME, MARKET_TYPE, limit=max(200, candles_needed), get_oi=get_oi)
         
         if df is None or len(df) < 30: return None
 
+        # Latest Values
         curr_rsi = df['rsi'].iloc[-1]
         prev_rsi = df['rsi'].iloc[-2]
         curr_price = df['close'].iloc[-1]
         curr_rvol = df['rvol'].iloc[-1]
+        
+        # Expert Indicators
+        bb_lower = df['bb_lower'].iloc[-1]
+        bb_upper = df['bb_upper'].iloc[-1]
+        ema_200 = df['ema_200'].iloc[-1]
+        adx = df['adx'].iloc[-1]
         curr_macd = df['macd'].iloc[-1]
         curr_signal = df['macd_signal'].iloc[-1]
-        macd_trend = "BULLISH 🟢" if curr_macd > curr_signal else "BEARISH 🔴"
         
+        macd_trend = "BULLISH 🟢" if curr_macd > curr_signal else "BEARISH 🔴"
         funding_rate_display = "N/A"
+        fr_val = 0
         if MARKET_TYPE == "Futures" and symbol in funding_map:
-            fr = funding_map[symbol]
-            funding_rate_display = f"{fr * 100:.4f}%"
+            fr_val = funding_map[symbol]
+            funding_rate_display = f"{fr_val * 100:.4f}%"
 
         match_found = False
         status_msg = ""
@@ -343,28 +359,68 @@ def analyze_symbol(symbol, client_args, scan_params):
         
         flip_time = "-"; old_funding = "-"; flip_rate = "-"; long_pct = 0.0; short_pct = 0.0; flip_type = "Neutral"
         flip_price_val = "N/A"; change_pct_str = "0.00%"
-        
-        # Trap Vars
         nl_rsi_val = 0; ns_rsi_val = 0; trap_message = ""
+        
+        expert_score = 0
+        expert_advice = ""
 
         # --- LOGIC SELECTION ---
-        if SEARCH_MODE == "🪤 Trap Master (Net Positions)":
+        if SEARCH_MODE == "💎 Expert Confluence Score":
+            # --- SCORING SYSTEM ---
+            # 1. RSI Logic (30 pts)
+            if curr_rsi < 30: expert_score += 30
+            elif curr_rsi > 70: expert_score -= 30 # Bearish score
+            
+            # 2. Bollinger Bands (20 pts)
+            if curr_price <= bb_lower * 1.01: expert_score += 20 # Near Bottom
+            elif curr_price >= bb_upper * 0.99: expert_score -= 20 # Near Top
+            
+            # 3. Volume (15 pts)
+            if curr_rvol > 2: expert_score += 15 # High Volume
+            
+            # 4. MACD (15 pts)
+            if curr_macd > curr_signal: expert_score += 15
+            else: expert_score -= 15
+            
+            # 5. Funding (20 pts)
+            if fr_val < 0: expert_score += 20 # Negative funding = Bullish squeeze
+            
+            # Normalize negative scores for "Strong Sell" logic if needed, 
+            # but for now let's focus on Buying Score (0-100).
+            # If aiming for Sell, we can invert logic. Let's keep it simple: 
+            # > 60 = Buy Signal, < -60 = Sell Signal
+            
+            abs_score = abs(expert_score)
+            
+            if abs_score >= MIN_SCORE:
+                match_found = True
+                if expert_score > 0:
+                    status_msg = f"💎 Strong Buy (Score: {expert_score})"
+                    signal_type = "BUY"
+                    group_tag = "BuySignal"
+                else:
+                    status_msg = f"🐻 Strong Sell (Score: {abs(expert_score)})"
+                    signal_type = "SELL"
+                    group_tag = "SellSignal"
+                
+                # ADX Filter Warning
+                if adx > 25: expert_advice = "Strong Trend Detected."
+                else: expert_advice = "Weak Trend (Ranging)."
+                
+                if signal_type == "BUY" and curr_price < ema_200:
+                    expert_advice += " ⚠️ Counter-Trend (Below EMA200)."
+                elif signal_type == "BUY" and curr_price > ema_200:
+                    expert_advice += " ✅ With Trend."
+
+        elif SEARCH_MODE == "🪤 Trap Master (Net Positions)":
             if MARKET_TYPE != "Futures": return None 
             if 'nl_rsi' in df.columns:
                 nl_rsi_val = df['nl_rsi'].iloc[-1]
                 ns_rsi_val = df['ns_rsi'].iloc[-1]
-                
-                # Simplified Report Logic
                 if nl_rsi_val > TRAP_RSI_THRESHOLD:
-                    match_found = True
-                    trap_message = "Crowded Longs (Dump Risk 📉)"
-                    group_tag = "TrapLongs"
-                    signal_type = "SELL"
+                    match_found = True; trap_message = "Crowded Longs (Dump Risk 📉)"; group_tag = "TrapLongs"; signal_type = "SELL"
                 elif ns_rsi_val > TRAP_RSI_THRESHOLD:
-                    match_found = True
-                    trap_message = "Crowded Shorts (Squeeze Risk 🚀)"
-                    group_tag = "TrapShorts"
-                    signal_type = "BUY"
+                    match_found = True; trap_message = "Crowded Shorts (Squeeze Risk 🚀)"; group_tag = "TrapShorts"; signal_type = "BUY"
 
         elif SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
             if MARKET_TYPE == "Futures":
@@ -390,14 +446,10 @@ def analyze_symbol(symbol, client_args, scan_params):
                     except: pass
 
         elif SEARCH_MODE == "📊 All-in-One Report":
-            if prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL:
-                    match_found = True; status_msg = "📉 BREAKDOWN (Buy Dip)"; signal_type = "BUY"; group_tag = "Signal"
-            elif prev_rsi < OVERBOUGHT_VAL and curr_rsi >= OVERBOUGHT_VAL:
-                    match_found = True; status_msg = "🚀 BREAKOUT (Pump)"; signal_type = "SELL"; group_tag = "Signal"
-            elif curr_rsi <= OVERSOLD_VAL:
-                    match_found = True; status_msg = "Oversold Zone"; signal_type = "BUY"; group_tag = "Oversold"
-            elif curr_rsi >= OVERBOUGHT_VAL:
-                    match_found = True; status_msg = "Overbought Zone"; signal_type = "SELL"; group_tag = "Overbought"
+            if prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL: match_found = True; status_msg = "📉 BREAKDOWN"; signal_type = "BUY"; group_tag = "Signal"
+            elif prev_rsi < OVERBOUGHT_VAL and curr_rsi >= OVERBOUGHT_VAL: match_found = True; status_msg = "🚀 BREAKOUT"; signal_type = "SELL"; group_tag = "Signal"
+            elif curr_rsi <= OVERSOLD_VAL: match_found = True; status_msg = "Oversold Zone"; signal_type = "BUY"; group_tag = "Oversold"
+            elif curr_rsi >= OVERBOUGHT_VAL: match_found = True; status_msg = "Overbought Zone"; signal_type = "SELL"; group_tag = "Overbought"
         
         elif SEARCH_MODE == "Crossover Alert":
             if RSI_ALERT_LEVEL < 50:
@@ -439,16 +491,20 @@ def analyze_symbol(symbol, client_args, scan_params):
                 "has_funding_flip_alert": "Flip" in funding_rate_display,
                 "Flip Price": flip_price_val,
                 "Change %": change_pct_str,
-                # Easy Report Columns for Trap Master
                 "Market State": trap_message,
                 "NL RSI": round(nl_rsi_val, 2),
-                "NS RSI": round(ns_rsi_val, 2)
+                "NS RSI": round(ns_rsi_val, 2),
+                # New Expert Data
+                "Score": abs(expert_score),
+                "Expert Advice": expert_advice,
+                "ADX": round(adx, 2),
+                "EMA200": round(ema_200, 4)
             }
         return None
     except: return None
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance RSI Pro Scanner 3.2")
+st.title(f"🤖 Binance Expert Scanner 4.0")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -482,7 +538,7 @@ if st.button("🔄 Start New Scan", type="primary"):
             except: pass
 
         symbols = [s['symbol'] for s in exchange_info['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'TRADING']
-        candles_needed = 100 
+        candles_needed = 200 # Need more candles for EMA200
         days_to_check = REPORT_DAYS if SEARCH_MODE == "📊 All-in-One Report" else 0
         if SEARCH_MODE == "Sustained Trend (Days)": days_to_check = SUSTAINED_DAYS
         if days_to_check > 0:
@@ -507,7 +563,8 @@ if st.button("🔄 Start New Scan", type="primary"):
             'OVERSOLD_VAL': locals().get('OVERSOLD_VAL', 30),
             'TREND_TYPE': locals().get('TREND_TYPE', "Always ABOVE"),
             'TREND_RSI_LEVEL': locals().get('TREND_RSI_LEVEL', 70),
-            'TRAP_RSI_THRESHOLD': locals().get('TRAP_RSI_THRESHOLD', 70)
+            'TRAP_RSI_THRESHOLD': locals().get('TRAP_RSI_THRESHOLD', 70),
+            'MIN_SCORE': locals().get('MIN_SCORE', 60)
         }
 
         status_text.text(f"Scanning {total_symbols} coins (Parallel Mode)...")
@@ -565,7 +622,20 @@ if st.session_state.scan_performed:
             st.subheader(f"Found {len(alerts)} Signals")
             df_res = pd.DataFrame(alerts)
             
-            if SEARCH_MODE == "🪤 Trap Master (Net Positions)":
+            if SEARCH_MODE == "💎 Expert Confluence Score":
+                st.info("💡 **Score Breakdown:** RSI Oversold (+30), Bollinger Low (+20), Neg Funding (+20), Vol Spike (+15), Bullish MACD (+15). Max 100.")
+                cols_to_show = ['Symbol', 'Price', 'Score', 'Expert Advice', 'RSI', 'Trend (MACD)', 'Signal', 'ADX']
+                df_buy = df_res[df_res['Signal'] == 'BUY'].sort_values("Score", ascending=False)
+                df_sell = df_res[df_res['Signal'] == 'SELL'].sort_values("Score", ascending=False)
+                
+                if not df_buy.empty:
+                    st.subheader("🟢 Top BUY Candidates")
+                    st.dataframe(df_buy[cols_to_show], use_container_width=True)
+                if not df_sell.empty:
+                    st.subheader("🔴 Top SELL Candidates")
+                    st.dataframe(df_sell[cols_to_show], use_container_width=True)
+
+            elif SEARCH_MODE == "🪤 Trap Master (Net Positions)":
                 st.info("🔎 **Report Guide:**\n- **Crowded Shorts (Squeeze Risk):** Shorts bohat zyada hain, price uper ja sakti hai.\n- **Crowded Longs (Dump Risk):** Longs bohat zyada hain, price gir sakti hai.")
                 cols_to_show = ['Symbol', 'Price', 'Market State', 'NL RSI', 'NS RSI', 'Signal']
                 st.dataframe(df_res[cols_to_show], use_container_width=True)
@@ -600,8 +670,8 @@ if st.session_state.scan_performed:
                 c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("Price", f"${coin_details['Price']}")
                 c2.metric("RSI", coin_details['RSI'])
-                c3.metric("Trend", coin_details.get('Trend (MACD)', 'N/A'))
-                c4.metric("Market State", coin_details.get('Market State', 'N/A'))
+                c3.metric("Score", coin_details.get('Score', 'N/A'))
+                c4.metric("ADX", coin_details.get('ADX', 'N/A'))
                 funding_val = coin_details.get('Current Funding', coin_details.get('Funding', 'N/A'))
                 c5.metric("Funding", funding_val)
             plot_chart(client, selected_coin, TIMEFRAME, MARKET_TYPE)
