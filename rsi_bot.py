@@ -13,7 +13,7 @@ import concurrent.futures
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Pro Scanner 3.5",
+    page_title="Binance RSI Pro Scanner 3.6",
     page_icon="💎",
     layout="wide",
     initial_sidebar_state="expanded" 
@@ -36,7 +36,7 @@ if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Expert Settings 3.5")
+st.sidebar.title("⚙️ Expert Settings 3.6")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
@@ -66,12 +66,15 @@ st.sidebar.divider()
 st.sidebar.subheader("🔍 Strategy")
 SEARCH_MODE = st.sidebar.radio(
     "Select Strategy:",
-    ["💎 Expert Confluence Score", "📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)", "🪤 Trap Master (Net Positions + CPD)"],
+    ["🔍 Single Coin Inspector", "💎 Expert Confluence Score", "📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)", "🪤 Trap Master (Net Positions + CPD)"],
     index=0 
 )
 
 # DEFAULT VALUES RELAXED FOR BETTER RESULTS
-if SEARCH_MODE == "Expert Confluence Score":
+if SEARCH_MODE == "🔍 Single Coin Inspector":
+    st.sidebar.info("🕵️ Detailed analysis of a single specific coin.")
+
+elif SEARCH_MODE == "Expert Confluence Score":
     st.sidebar.info("🏆 Score based on RSI, MACD, Volume, Funding & Chandelier Exit (CE).")
     MIN_SCORE = st.sidebar.slider("Min Score to Show", 0, 100, 30, help="Lower this if no results appear.")
 
@@ -273,7 +276,7 @@ def get_long_short_ratio(client, symbol):
 
 def plot_chart(client, symbol, tf, market_type):
     with st.spinner(f"Loading Chart for {symbol}..."):
-        is_trap_mode = (SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)")
+        is_trap_mode = (SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)") or (SEARCH_MODE == "🔍 Single Coin Inspector" and MARKET_TYPE == "Futures")
         df = get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=is_trap_mode)
         if df is None: st.error("Could not load chart data."); return
 
@@ -470,7 +473,7 @@ def analyze_symbol(symbol, client_args, scan_params):
     except: return None
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance Expert Scanner 3.5")
+st.title(f"🤖 Binance Expert Scanner 3.6")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -481,90 +484,163 @@ except Exception as e:
     st.error(f"❌ Connection Error: {e}")
     st.stop()
 
-if st.button("🔄 Start New Scan", type="primary"):
-    st.session_state.scan_results = []
-    st.session_state.scan_performed = False
-
-    if USE_US_BINANCE and MARKET_TYPE == "Futures":
-        st.error("❌ Binance.US does not support Futures."); st.stop()
-
-    status_text = st.empty()
-    progress_bar = st.progress(0)
+# --- SINGLE COIN INSPECTOR LOGIC ---
+if SEARCH_MODE == "🔍 Single Coin Inspector":
+    st.markdown(f"### 🔎 Single Coin Inspector ({MARKET_TYPE})")
     
+    # Fetch symbols for dropdown
     try:
-        status_text.text(f"Fetching {MARKET_TYPE} pairs...")
+        if MARKET_TYPE == "Spot": info = client.get_exchange_info()
+        else: info = client.futures_exchange_info()
+        symbols_list = [s['symbol'] for s in info['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'TRADING']
+    except: symbols_list = []
+    
+    col_ins1, col_ins2 = st.columns([3, 1])
+    with col_ins1:
+        selected_insp_coin = st.selectbox("Select Coin:", symbols_list)
+    with col_ins2:
+        st.write("") # Spacer
+        st.write("") # Spacer
+        inspect_btn = st.button("🔍 Analyze Coin", type="primary")
+        
+    if inspect_btn and selected_insp_coin:
+        st.session_state.scan_results = [] # Clear scanner results to avoid confusion
+        
+        # Funding Rates (if futures)
         funding_map = {}
-        if MARKET_TYPE == "Spot": 
-            exchange_info = client.get_exchange_info()
-        else: 
-            exchange_info = client.futures_exchange_info()
+        if MARKET_TYPE == "Futures":
             try:
-                mark_prices = client.futures_mark_price()
-                for item in mark_prices: funding_map[item['symbol']] = float(item['lastFundingRate'])
+                fr = client.futures_funding_rate(symbol=selected_insp_coin, limit=1)
+                if fr: funding_map[selected_insp_coin] = float(fr[0]['fundingRate'])
             except: pass
-
-        symbols = [s['symbol'] for s in exchange_info['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'TRADING']
-        candles_needed = 200 
-        days_to_check = REPORT_DAYS if SEARCH_MODE == "📊 All-in-One Report" else 0
-        if SEARCH_MODE == "Sustained Trend (Days)": days_to_check = SUSTAINED_DAYS
-        if days_to_check > 0:
-            tf_minutes = get_tf_in_minutes(TIMEFRAME)
-            candles_needed = int((days_to_check * 1440) / tf_minutes) + 30 
-
-        alerts = []
-        total_symbols = len(symbols)
-        sound_triggered = False
-        
-        scan_params = {
-            'client': client,
-            'TIMEFRAME': TIMEFRAME,
-            'MARKET_TYPE': MARKET_TYPE,
-            'SEARCH_MODE': SEARCH_MODE,
-            'funding_map': funding_map,
-            'candles_needed': candles_needed,
-            'RSI_ALERT_LEVEL': locals().get('RSI_ALERT_LEVEL', 35),
-            'MIN_RSI': locals().get('MIN_RSI', 70),
-            'MAX_RSI': locals().get('MAX_RSI', 90),
-            'OVERBOUGHT_VAL': locals().get('OVERBOUGHT_VAL', 70),
-            'OVERSOLD_VAL': locals().get('OVERSOLD_VAL', 30),
-            'TREND_TYPE': locals().get('TREND_TYPE', "Always ABOVE"),
-            'TREND_RSI_LEVEL': locals().get('TREND_RSI_LEVEL', 65),
-            'TRAP_RSI_THRESHOLD': locals().get('TRAP_RSI_THRESHOLD', 70),
-            'MIN_SCORE': locals().get('MIN_SCORE', 30)
-        }
-
-        status_text.text(f"Scanning {total_symbols} coins (Parallel Mode)...")
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_symbol = {executor.submit(analyze_symbol, sym, {}, scan_params): sym for sym in symbols}
-            completed_count = 0
-            for future in concurrent.futures.as_completed(future_to_symbol):
-                completed_count += 1
-                progress = completed_count / total_symbols
-                progress_bar.progress(progress)
-                status_text.text(f"Scanning {completed_count}/{total_symbols}...") # Progress Text
-                try:
-                    result = future.result()
-                    if result:
-                        alerts.append(result)
-                        if result.get("has_funding_flip_alert") and ENABLE_SOUND and not sound_triggered:
-                            play_sound_alert(); sound_triggered = True; st.toast(f"🔔 Funding Change: {result['Symbol']}")
-                except Exception as exc: pass 
-
-        progress_bar.empty()
-        status_text.success(f"✅ Scan Complete! Scanned {total_symbols} coins.")
-        
-        if not alerts:
-            st.warning("⚠️ No signals found. Try lowering the 'Min Score' or adjusting thresholds in the sidebar.")
-
-        if alerts and GSHEET_URL and AUTO_EXPORT:
-            if send_to_google_sheet(alerts, GSHEET_URL): st.toast("✅ Google Sheet Updated!")
-
-        st.session_state.scan_results = alerts
-        st.session_state.scan_performed = True
             
-    except Exception as e:
-        st.error(f"Error: {e}")
+        # Re-use analyze logic or just fetch directly
+        # Let's fetch directly to show EVERYTHING
+        with st.spinner(f"Analyzing {selected_insp_coin}..."):
+            df = get_data_with_indicators(client, selected_insp_coin, TIMEFRAME, MARKET_TYPE, limit=200, get_oi=(MARKET_TYPE=="Futures"))
+            
+            if df is not None:
+                curr = df.iloc[-1]
+                
+                # --- METRICS ROW 1 ---
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Price", f"${curr['close']}")
+                m2.metric("RSI (14)", f"{curr['rsi']:.2f}")
+                m3.metric("RVOL", f"{curr['rvol']:.2f}")
+                m4.metric("ADX", f"{curr['adx']:.2f}")
+                
+                trend = "Bullish" if curr['macd'] > curr['macd_signal'] else "Bearish"
+                m5.metric("MACD Trend", trend)
+                
+                # --- METRICS ROW 2 (Futures Specific) ---
+                if MARKET_TYPE == "Futures":
+                    st.divider()
+                    f1, f2, f3, f4, f5 = st.columns(5)
+                    fr_val = funding_map.get(selected_insp_coin, 0)
+                    f1.metric("Funding Rate", f"{fr_val*100:.4f}%")
+                    
+                    l_ratio, s_ratio = get_long_short_ratio(client, selected_insp_coin)
+                    f2.metric("Long/Short Ratio", f"{l_ratio:.1f}% / {s_ratio:.1f}%")
+                    
+                    if 'nl_rsi' in df.columns:
+                        f3.metric("Net Long RSI", f"{curr['nl_rsi']:.2f}")
+                        f4.metric("Net Short RSI", f"{curr['ns_rsi']:.2f}")
+                        f5.metric("CPD RSI", f"{curr['cpd_rsi']:.2f}")
+                
+                # --- CHART ---
+                st.divider()
+                st.subheader("Price & Indicator Analysis")
+                plot_chart(client, selected_insp_coin, TIMEFRAME, MARKET_TYPE)
+                
+            else:
+                st.error("Failed to fetch data for this coin.")
+
+# --- BULK SCANNER LOGIC (Original) ---
+else:
+    if st.button("🔄 Start New Scan", type="primary"):
+        st.session_state.scan_results = []
+        st.session_state.scan_performed = False
+
+        if USE_US_BINANCE and MARKET_TYPE == "Futures":
+            st.error("❌ Binance.US does not support Futures."); st.stop()
+
+        status_text = st.empty()
+        progress_bar = st.progress(0)
+        
+        try:
+            status_text.text(f"Fetching {MARKET_TYPE} pairs...")
+            funding_map = {}
+            if MARKET_TYPE == "Spot": 
+                exchange_info = client.get_exchange_info()
+            else: 
+                exchange_info = client.futures_exchange_info()
+                try:
+                    mark_prices = client.futures_mark_price()
+                    for item in mark_prices: funding_map[item['symbol']] = float(item['lastFundingRate'])
+                except: pass
+
+            symbols = [s['symbol'] for s in exchange_info['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'TRADING']
+            candles_needed = 200 
+            days_to_check = REPORT_DAYS if SEARCH_MODE == "📊 All-in-One Report" else 0
+            if SEARCH_MODE == "Sustained Trend (Days)": days_to_check = SUSTAINED_DAYS
+            if days_to_check > 0:
+                tf_minutes = get_tf_in_minutes(TIMEFRAME)
+                candles_needed = int((days_to_check * 1440) / tf_minutes) + 30 
+
+            alerts = []
+            total_symbols = len(symbols)
+            sound_triggered = False
+            
+            scan_params = {
+                'client': client,
+                'TIMEFRAME': TIMEFRAME,
+                'MARKET_TYPE': MARKET_TYPE,
+                'SEARCH_MODE': SEARCH_MODE,
+                'funding_map': funding_map,
+                'candles_needed': candles_needed,
+                'RSI_ALERT_LEVEL': locals().get('RSI_ALERT_LEVEL', 35),
+                'MIN_RSI': locals().get('MIN_RSI', 70),
+                'MAX_RSI': locals().get('MAX_RSI', 90),
+                'OVERBOUGHT_VAL': locals().get('OVERBOUGHT_VAL', 70),
+                'OVERSOLD_VAL': locals().get('OVERSOLD_VAL', 30),
+                'TREND_TYPE': locals().get('TREND_TYPE', "Always ABOVE"),
+                'TREND_RSI_LEVEL': locals().get('TREND_RSI_LEVEL', 65),
+                'TRAP_RSI_THRESHOLD': locals().get('TRAP_RSI_THRESHOLD', 70),
+                'MIN_SCORE': locals().get('MIN_SCORE', 30)
+            }
+
+            status_text.text(f"Scanning {total_symbols} coins (Parallel Mode)...")
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_symbol = {executor.submit(analyze_symbol, sym, {}, scan_params): sym for sym in symbols}
+                completed_count = 0
+                for future in concurrent.futures.as_completed(future_to_symbol):
+                    completed_count += 1
+                    progress = completed_count / total_symbols
+                    progress_bar.progress(progress)
+                    status_text.text(f"Scanning {completed_count}/{total_symbols}...") # Progress Text
+                    try:
+                        result = future.result()
+                        if result:
+                            alerts.append(result)
+                            if result.get("has_funding_flip_alert") and ENABLE_SOUND and not sound_triggered:
+                                play_sound_alert(); sound_triggered = True; st.toast(f"🔔 Funding Change: {result['Symbol']}")
+                    except Exception as exc: pass 
+
+            progress_bar.empty()
+            status_text.success(f"✅ Scan Complete! Scanned {total_symbols} coins.")
+            
+            if not alerts:
+                st.warning("⚠️ No signals found. Try lowering the 'Min Score' or adjusting thresholds in the sidebar.")
+
+            if alerts and GSHEET_URL and AUTO_EXPORT:
+                if send_to_google_sheet(alerts, GSHEET_URL): st.toast("✅ Google Sheet Updated!")
+
+            st.session_state.scan_results = alerts
+            st.session_state.scan_performed = True
+                
+        except Exception as e:
+            st.error(f"Error: {e}")
 
 def highlight_ls(row):
     styles = [''] * len(row)
@@ -576,7 +652,7 @@ def highlight_ls(row):
     except: pass
     return styles
 
-if st.session_state.scan_performed:
+if st.session_state.scan_performed and SEARCH_MODE != "🔍 Single Coin Inspector":
     alerts = st.session_state.scan_results
     if alerts:
         st.sidebar.divider()
