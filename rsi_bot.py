@@ -13,7 +13,7 @@ import concurrent.futures
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance Expert Scanner 4.0",
+    page_title="Binance RSI Pro Scanner 3.4",
     page_icon="💎",
     layout="wide",
     initial_sidebar_state="expanded" 
@@ -36,7 +36,7 @@ if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Expert Settings 4.0")
+st.sidebar.title("⚙️ Expert Settings 3.4")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
@@ -64,16 +64,14 @@ st.sidebar.divider()
 
 # 3. Strategy
 st.sidebar.subheader("🔍 Strategy")
-# Added "Expert Score" option
 SEARCH_MODE = st.sidebar.radio(
     "Select Strategy:",
-    ["💎 Expert Confluence Score", "📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)", "🪤 Trap Master (Net Positions)"],
-    index=0 # Default to Expert Score
+    ["💎 Expert Confluence Score", "📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)", "🪤 Trap Master (Net Positions + CPD)"],
+    index=0 
 )
 
-# Dynamic Inputs
 if SEARCH_MODE == "Expert Confluence Score":
-    st.sidebar.info("🏆 Ranks coins based on a 0-100 Score using RSI, Bollinger Bands, MACD, Volume & Funding.")
+    st.sidebar.info("🏆 Score based on RSI, MACD, Volume, Funding & Chandelier Exit (CE).")
     MIN_SCORE = st.sidebar.slider("Min Score to Show", 0, 100, 60, help="Higher is stricter.")
 
 elif SEARCH_MODE == "Crossover Alert":
@@ -97,8 +95,8 @@ elif SEARCH_MODE == "📊 All-in-One Report":
     REPORT_DAYS = st.sidebar.number_input("Sustained Trend Days", 1, 10, 3)
 elif SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
     st.sidebar.info("🔎 Finds Funding Flips with Price Change Analysis.")
-elif SEARCH_MODE == "🪤 Trap Master (Net Positions)":
-    st.sidebar.info("🧠 Analyzes 'Net Positions' logic to find Overcrowded Shorts/Longs.")
+elif SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)":
+    st.sidebar.info("🧠 Analyzes Net Longs, Shorts & CPD to find Traps.")
     TRAP_RSI_THRESHOLD = st.sidebar.number_input("Overcrowded Threshold (RSI)", 50, 100, 70, help="Level above which positions are considered 'Trapped' or 'Heavy'.")
 
 TIMEFRAME_OPTIONS = {
@@ -146,6 +144,19 @@ def send_to_google_sheet(data, url):
         st.error(f"Failed to upload to Sheet: {e}")
         return False
 
+def calculate_chandelier_exit(df, period=22, multiplier=3.0):
+    """Calculates Chandelier Exit (Long/Short)"""
+    try:
+        high_roll = df['high'].rolling(period).max()
+        low_roll = df['low'].rolling(period).min()
+        atr = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period).average_true_range()
+        
+        df['ce_long'] = high_roll - (atr * multiplier)
+        df['ce_short'] = low_roll + (atr * multiplier)
+        return df
+    except:
+        return df
+
 def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=False):
     try:
         if market_type == "Spot":
@@ -160,31 +171,32 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
         cols = ['open','high','low','close','volume']
         df[cols] = df[cols].astype(float)
         
-        # --- BASIC INDICATORS ---
+        # --- INDICATORS ---
         df['rsi'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
         df['rvol'] = df['volume'] / df['vol_sma']
         
-        # MACD
         macd = ta.trend.MACD(close=df['close'])
         df['macd'] = macd.macd()
         df['macd_signal'] = macd.macd_signal()
         df['macd_diff'] = macd.macd_diff()
 
-        # --- EXPERT INDICATORS ---
-        # 1. Bollinger Bands
+        # Bollinger Bands
         bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
         df['bb_upper'] = bb.bollinger_hband()
         df['bb_lower'] = bb.bollinger_lband()
         
-        # 2. EMA 200 (Trend Filter)
+        # EMA 200
         df['ema_200'] = ta.trend.EMAIndicator(close=df['close'], window=200).ema_indicator()
         
-        # 3. ADX (Trend Strength)
+        # ADX
         adx = ta.trend.ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
         df['adx'] = adx.adx()
 
-        # 2. Get Open Interest (For Trap Master Logic)
+        # Chandelier Exit (CE)
+        df = calculate_chandelier_exit(df)
+
+        # Trap Mode / OI Logic
         if get_oi and market_type == "Futures":
             try:
                 oi_data = client.futures_open_interest_hist(symbol=symbol, period=tf, limit=limit)
@@ -196,7 +208,7 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
                 df['oi'] = df_oi['sumOpenInterestValue']
                 df['delta_oi'] = df['oi'].diff()
                 
-                # Net Positions Logic
+                # CPD (Cumulative Position Delta) Logic
                 price_up = df['close'] > df['open']
                 price_down = df['close'] < df['open']
                 oi_up = df['delta_oi'] > 0
@@ -209,8 +221,13 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
                 
                 df['net_longs'] = (longs_entering.fillna(0) - longs_exiting.fillna(0).abs()).cumsum()
                 df['net_shorts'] = (shorts_entering.fillna(0) - shorts_exiting.fillna(0).abs()).cumsum()
+                
+                # CPD Calculation (Net Longs - Net Shorts)
+                df['cpd'] = df['net_longs'] - df['net_shorts']
+                
                 df['nl_rsi'] = ta.momentum.RSIIndicator(close=df['net_longs'], window=14).rsi()
                 df['ns_rsi'] = ta.momentum.RSIIndicator(close=df['net_shorts'], window=14).rsi()
+                df['cpd_rsi'] = ta.momentum.RSIIndicator(close=df['cpd'], window=14).rsi()
             except Exception: pass
         
         return df
@@ -264,23 +281,26 @@ def get_long_short_ratio(client, symbol):
 
 def plot_chart(client, symbol, tf, market_type):
     with st.spinner(f"Loading Chart for {symbol}..."):
-        is_trap_mode = (SEARCH_MODE == "🪤 Trap Master (Net Positions)")
+        is_trap_mode = (SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)")
         df = get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=is_trap_mode)
         if df is None: st.error("Could not load chart data."); return
 
         rows = 4
-        titles = (f'{symbol} Price + Bollinger Bands', 'RSI (14)', 'MACD', 'Volume')
+        titles = (f'{symbol} Price + CE', 'RSI (14)', 'MACD', 'Volume')
         
         if is_trap_mode and 'nl_rsi' in df.columns:
-            titles = (f'{symbol} Price', 'RSI (14)', 'Net Positions RSI', 'Volume')
+            titles = (f'{symbol} Price', 'RSI (14)', 'Net Positions & CPD', 'Volume')
         
         fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, 
                             subplot_titles=titles, row_width=[0.15, 0.15, 0.15, 0.55])
 
-        # 1. Price + BB + EMA
+        # 1. Price + CE + EMA
         fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Price'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['time'], y=df['bb_upper'], name='BB Upper', line=dict(color='gray', width=1, dash='dot')), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df['time'], y=df['bb_lower'], name='BB Lower', line=dict(color='gray', width=1, dash='dot')), row=1, col=1)
+        # Chandelier Exit Lines
+        if 'ce_long' in df.columns:
+            fig.add_trace(go.Scatter(x=df['time'], y=df['ce_long'], name='CE Long', line=dict(color='green', width=1, dash='dot')), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df['time'], y=df['ce_short'], name='CE Short', line=dict(color='red', width=1, dash='dot')), row=1, col=1)
+        
         fig.add_trace(go.Scatter(x=df['time'], y=df['ema_200'], name='EMA 200', line=dict(color='orange', width=2)), row=1, col=1)
 
         # 2. RSI
@@ -292,6 +312,10 @@ def plot_chart(client, symbol, tf, market_type):
         if is_trap_mode and 'nl_rsi' in df.columns:
             fig.add_trace(go.Scatter(x=df['time'], y=df['nl_rsi'], name='Net Long RSI', line=dict(color='#00ff00', width=2)), row=3, col=1)
             fig.add_trace(go.Scatter(x=df['time'], y=df['ns_rsi'], name='Net Short RSI', line=dict(color='#ff0000', width=2)), row=3, col=1)
+            # CPD Trace
+            if 'cpd_rsi' in df.columns:
+                fig.add_trace(go.Scatter(x=df['time'], y=df['cpd_rsi'], name='CPD RSI (Delta)', line=dict(color='yellow', width=2, dash='dot')), row=3, col=1)
+            fig.add_hline(y=80, line_dash="dot", line_color="white", row=3, col=1, annotation_text="Overcrowded")
         else:
             fig.add_trace(go.Scatter(x=df['time'], y=df['macd'], name='MACD', line=dict(color='blue', width=1.5)), row=3, col=1)
             fig.add_trace(go.Scatter(x=df['time'], y=df['macd_signal'], name='Signal', line=dict(color='orange', width=1.5)), row=3, col=1)
@@ -326,7 +350,7 @@ def analyze_symbol(symbol, client_args, scan_params):
         TRAP_RSI_THRESHOLD = scan_params.get('TRAP_RSI_THRESHOLD', 70)
 
         # 1. Fetch Data
-        get_oi = (SEARCH_MODE == "🪤 Trap Master (Net Positions)")
+        get_oi = (SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)")
         df = get_data_with_indicators(client, symbol, TIMEFRAME, MARKET_TYPE, limit=max(200, candles_needed), get_oi=get_oi)
         
         if df is None or len(df) < 30: return None
@@ -345,6 +369,10 @@ def analyze_symbol(symbol, client_args, scan_params):
         curr_macd = df['macd'].iloc[-1]
         curr_signal = df['macd_signal'].iloc[-1]
         
+        # CE Values
+        ce_long = df['ce_long'].iloc[-1]
+        ce_short = df['ce_short'].iloc[-1]
+        
         macd_trend = "BULLISH 🟢" if curr_macd > curr_signal else "BEARISH 🔴"
         funding_rate_display = "N/A"
         fr_val = 0
@@ -359,36 +387,34 @@ def analyze_symbol(symbol, client_args, scan_params):
         
         flip_time = "-"; old_funding = "-"; flip_rate = "-"; long_pct = 0.0; short_pct = 0.0; flip_type = "Neutral"
         flip_price_val = "N/A"; change_pct_str = "0.00%"
-        nl_rsi_val = 0; ns_rsi_val = 0; trap_message = ""
+        nl_rsi_val = 0; ns_rsi_val = 0; cpd_rsi_val = 0; trap_message = ""
         
         expert_score = 0
         expert_advice = ""
 
         # --- LOGIC SELECTION ---
         if SEARCH_MODE == "💎 Expert Confluence Score":
-            # --- SCORING SYSTEM ---
-            # 1. RSI Logic (30 pts)
+            # 1. RSI (30 pts)
             if curr_rsi < 30: expert_score += 30
-            elif curr_rsi > 70: expert_score -= 30 # Bearish score
+            elif curr_rsi > 70: expert_score -= 30
             
             # 2. Bollinger Bands (20 pts)
-            if curr_price <= bb_lower * 1.01: expert_score += 20 # Near Bottom
-            elif curr_price >= bb_upper * 0.99: expert_score -= 20 # Near Top
+            if curr_price <= bb_lower * 1.01: expert_score += 20
+            elif curr_price >= bb_upper * 0.99: expert_score -= 20
             
             # 3. Volume (15 pts)
-            if curr_rvol > 2: expert_score += 15 # High Volume
+            if curr_rvol > 2: expert_score += 15
             
-            # 4. MACD (15 pts)
-            if curr_macd > curr_signal: expert_score += 15
-            else: expert_score -= 15
+            # 4. MACD (10 pts)
+            if curr_macd > curr_signal: expert_score += 10
+            else: expert_score -= 10
             
-            # 5. Funding (20 pts)
-            if fr_val < 0: expert_score += 20 # Negative funding = Bullish squeeze
+            # 5. Funding (15 pts)
+            if fr_val < 0: expert_score += 15
             
-            # Normalize negative scores for "Strong Sell" logic if needed, 
-            # but for now let's focus on Buying Score (0-100).
-            # If aiming for Sell, we can invert logic. Let's keep it simple: 
-            # > 60 = Buy Signal, < -60 = Sell Signal
+            # 6. Chandelier Exit (CE) - NEW (10 pts)
+            if curr_price > ce_long: expert_score += 10
+            elif curr_price < ce_short: expert_score -= 10
             
             abs_score = abs(expert_score)
             
@@ -396,27 +422,23 @@ def analyze_symbol(symbol, client_args, scan_params):
                 match_found = True
                 if expert_score > 0:
                     status_msg = f"💎 Strong Buy (Score: {expert_score})"
-                    signal_type = "BUY"
-                    group_tag = "BuySignal"
+                    signal_type = "BUY"; group_tag = "BuySignal"
                 else:
                     status_msg = f"🐻 Strong Sell (Score: {abs(expert_score)})"
-                    signal_type = "SELL"
-                    group_tag = "SellSignal"
+                    signal_type = "SELL"; group_tag = "SellSignal"
                 
-                # ADX Filter Warning
-                if adx > 25: expert_advice = "Strong Trend Detected."
-                else: expert_advice = "Weak Trend (Ranging)."
+                if adx > 25: expert_advice = "Strong Trend."
+                else: expert_advice = "Weak Trend."
                 
-                if signal_type == "BUY" and curr_price < ema_200:
-                    expert_advice += " ⚠️ Counter-Trend (Below EMA200)."
-                elif signal_type == "BUY" and curr_price > ema_200:
-                    expert_advice += " ✅ With Trend."
+                if signal_type == "BUY" and curr_price < ce_long: expert_advice += " ⚠️ Below CE Long (Risky)."
 
-        elif SEARCH_MODE == "🪤 Trap Master (Net Positions)":
+        elif SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)":
             if MARKET_TYPE != "Futures": return None 
             if 'nl_rsi' in df.columns:
                 nl_rsi_val = df['nl_rsi'].iloc[-1]
                 ns_rsi_val = df['ns_rsi'].iloc[-1]
+                if 'cpd_rsi' in df.columns: cpd_rsi_val = df['cpd_rsi'].iloc[-1]
+
                 if nl_rsi_val > TRAP_RSI_THRESHOLD:
                     match_found = True; trap_message = "Crowded Longs (Dump Risk 📉)"; group_tag = "TrapLongs"; signal_type = "SELL"
                 elif ns_rsi_val > TRAP_RSI_THRESHOLD:
@@ -494,7 +516,7 @@ def analyze_symbol(symbol, client_args, scan_params):
                 "Market State": trap_message,
                 "NL RSI": round(nl_rsi_val, 2),
                 "NS RSI": round(ns_rsi_val, 2),
-                # New Expert Data
+                "CPD RSI": round(cpd_rsi_val, 2) if cpd_rsi_val else "-", # New CPD Column
                 "Score": abs(expert_score),
                 "Expert Advice": expert_advice,
                 "ADX": round(adx, 2),
@@ -504,7 +526,7 @@ def analyze_symbol(symbol, client_args, scan_params):
     except: return None
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance Expert Scanner 4.0")
+st.title(f"🤖 Binance Expert Scanner 3.4")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -538,7 +560,7 @@ if st.button("🔄 Start New Scan", type="primary"):
             except: pass
 
         symbols = [s['symbol'] for s in exchange_info['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'TRADING']
-        candles_needed = 200 # Need more candles for EMA200
+        candles_needed = 200 
         days_to_check = REPORT_DAYS if SEARCH_MODE == "📊 All-in-One Report" else 0
         if SEARCH_MODE == "Sustained Trend (Days)": days_to_check = SUSTAINED_DAYS
         if days_to_check > 0:
@@ -623,7 +645,7 @@ if st.session_state.scan_performed:
             df_res = pd.DataFrame(alerts)
             
             if SEARCH_MODE == "💎 Expert Confluence Score":
-                st.info("💡 **Score Breakdown:** RSI Oversold (+30), Bollinger Low (+20), Neg Funding (+20), Vol Spike (+15), Bullish MACD (+15). Max 100.")
+                st.info("💡 **Score Breakdown:** RSI (+30), Bollinger (+20), Neg Funding (+15), Vol (+15), MACD (+10), Chandelier Exit (+10).")
                 cols_to_show = ['Symbol', 'Price', 'Score', 'Expert Advice', 'RSI', 'Trend (MACD)', 'Signal', 'ADX']
                 df_buy = df_res[df_res['Signal'] == 'BUY'].sort_values("Score", ascending=False)
                 df_sell = df_res[df_res['Signal'] == 'SELL'].sort_values("Score", ascending=False)
@@ -635,9 +657,9 @@ if st.session_state.scan_performed:
                     st.subheader("🔴 Top SELL Candidates")
                     st.dataframe(df_sell[cols_to_show], use_container_width=True)
 
-            elif SEARCH_MODE == "🪤 Trap Master (Net Positions)":
+            elif SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)":
                 st.info("🔎 **Report Guide:**\n- **Crowded Shorts (Squeeze Risk):** Shorts bohat zyada hain, price uper ja sakti hai.\n- **Crowded Longs (Dump Risk):** Longs bohat zyada hain, price gir sakti hai.")
-                cols_to_show = ['Symbol', 'Price', 'Market State', 'NL RSI', 'NS RSI', 'Signal']
+                cols_to_show = ['Symbol', 'Price', 'Market State', 'NL RSI', 'NS RSI', 'CPD RSI', 'Signal']
                 st.dataframe(df_res[cols_to_show], use_container_width=True)
 
             elif SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
