@@ -13,7 +13,7 @@ import concurrent.futures
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Pro Scanner 3.4",
+    page_title="Binance RSI Pro Scanner 3.5",
     page_icon="💎",
     layout="wide",
     initial_sidebar_state="expanded" 
@@ -36,7 +36,7 @@ if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Expert Settings 3.4")
+st.sidebar.title("⚙️ Expert Settings 3.5")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
@@ -70,13 +70,14 @@ SEARCH_MODE = st.sidebar.radio(
     index=0 
 )
 
+# DEFAULT VALUES RELAXED FOR BETTER RESULTS
 if SEARCH_MODE == "Expert Confluence Score":
     st.sidebar.info("🏆 Score based on RSI, MACD, Volume, Funding & Chandelier Exit (CE).")
-    MIN_SCORE = st.sidebar.slider("Min Score to Show", 0, 100, 60, help="Higher is stricter.")
+    MIN_SCORE = st.sidebar.slider("Min Score to Show", 0, 100, 30, help="Lower this if no results appear.")
 
 elif SEARCH_MODE == "Crossover Alert":
     st.sidebar.info("🔔 Alert when RSI crosses BELOW level.")
-    RSI_ALERT_LEVEL = st.sidebar.number_input("RSI Cross Level", 1, 100, 30)
+    RSI_ALERT_LEVEL = st.sidebar.number_input("RSI Cross Level", 1, 100, 35) # Relaxed to 35
 elif SEARCH_MODE == "RSI Range":
     st.sidebar.info("↔️ Show coins inside a specific RSI Range.")
     col1, col2 = st.sidebar.columns(2)
@@ -86,7 +87,7 @@ elif SEARCH_MODE == "Sustained Trend (Days)":
     st.sidebar.info("📅 Find coins staying Above/Below RSI.")
     SUSTAINED_DAYS = st.sidebar.number_input("Duration (Days)", 1, 30, 3)
     TREND_TYPE = st.sidebar.selectbox("Condition", ["Always ABOVE", "Always BELOW"])
-    TREND_RSI_LEVEL = st.sidebar.number_input("RSI Threshold", 1, 100, 70)
+    TREND_RSI_LEVEL = st.sidebar.number_input("RSI Threshold", 1, 100, 65) # Relaxed to 65
 elif SEARCH_MODE == "📊 All-in-One Report":
     st.sidebar.info("📑 Analyze Market for Signals, Overbought & Oversold.")
     col1, col2 = st.sidebar.columns(2)
@@ -145,7 +146,6 @@ def send_to_google_sheet(data, url):
         return False
 
 def calculate_chandelier_exit(df, period=22, multiplier=3.0):
-    """Calculates Chandelier Exit (Long/Short)"""
     try:
         high_roll = df['high'].rolling(period).max()
         low_roll = df['low'].rolling(period).min()
@@ -171,7 +171,6 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
         cols = ['open','high','low','close','volume']
         df[cols] = df[cols].astype(float)
         
-        # --- INDICATORS ---
         df['rsi'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
         df['rvol'] = df['volume'] / df['vol_sma']
@@ -181,22 +180,17 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
         df['macd_signal'] = macd.macd_signal()
         df['macd_diff'] = macd.macd_diff()
 
-        # Bollinger Bands
         bb = ta.volatility.BollingerBands(close=df['close'], window=20, window_dev=2)
         df['bb_upper'] = bb.bollinger_hband()
         df['bb_lower'] = bb.bollinger_lband()
         
-        # EMA 200
         df['ema_200'] = ta.trend.EMAIndicator(close=df['close'], window=200).ema_indicator()
         
-        # ADX
         adx = ta.trend.ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
         df['adx'] = adx.adx()
 
-        # Chandelier Exit (CE)
         df = calculate_chandelier_exit(df)
 
-        # Trap Mode / OI Logic
         if get_oi and market_type == "Futures":
             try:
                 oi_data = client.futures_open_interest_hist(symbol=symbol, period=tf, limit=limit)
@@ -208,7 +202,6 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
                 df['oi'] = df_oi['sumOpenInterestValue']
                 df['delta_oi'] = df['oi'].diff()
                 
-                # CPD (Cumulative Position Delta) Logic
                 price_up = df['close'] > df['open']
                 price_down = df['close'] < df['open']
                 oi_up = df['delta_oi'] > 0
@@ -222,7 +215,6 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
                 df['net_longs'] = (longs_entering.fillna(0) - longs_exiting.fillna(0).abs()).cumsum()
                 df['net_shorts'] = (shorts_entering.fillna(0) - shorts_exiting.fillna(0).abs()).cumsum()
                 
-                # CPD Calculation (Net Longs - Net Shorts)
                 df['cpd'] = df['net_longs'] - df['net_shorts']
                 
                 df['nl_rsi'] = ta.momentum.RSIIndicator(close=df['net_longs'], window=14).rsi()
@@ -294,25 +286,19 @@ def plot_chart(client, symbol, tf, market_type):
         fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, 
                             subplot_titles=titles, row_width=[0.15, 0.15, 0.15, 0.55])
 
-        # 1. Price + CE + EMA
         fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Price'), row=1, col=1)
-        # Chandelier Exit Lines
         if 'ce_long' in df.columns:
             fig.add_trace(go.Scatter(x=df['time'], y=df['ce_long'], name='CE Long', line=dict(color='green', width=1, dash='dot')), row=1, col=1)
             fig.add_trace(go.Scatter(x=df['time'], y=df['ce_short'], name='CE Short', line=dict(color='red', width=1, dash='dot')), row=1, col=1)
-        
         fig.add_trace(go.Scatter(x=df['time'], y=df['ema_200'], name='EMA 200', line=dict(color='orange', width=2)), row=1, col=1)
 
-        # 2. RSI
         fig.add_trace(go.Scatter(x=df['time'], y=df['rsi'], name='RSI', line=dict(color='purple', width=2)), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
-        # 3. MACD or Net Pos
         if is_trap_mode and 'nl_rsi' in df.columns:
             fig.add_trace(go.Scatter(x=df['time'], y=df['nl_rsi'], name='Net Long RSI', line=dict(color='#00ff00', width=2)), row=3, col=1)
             fig.add_trace(go.Scatter(x=df['time'], y=df['ns_rsi'], name='Net Short RSI', line=dict(color='#ff0000', width=2)), row=3, col=1)
-            # CPD Trace
             if 'cpd_rsi' in df.columns:
                 fig.add_trace(go.Scatter(x=df['time'], y=df['cpd_rsi'], name='CPD RSI (Delta)', line=dict(color='yellow', width=2, dash='dot')), row=3, col=1)
             fig.add_hline(y=80, line_dash="dot", line_color="white", row=3, col=1, annotation_text="Overcrowded")
@@ -322,9 +308,7 @@ def plot_chart(client, symbol, tf, market_type):
             colors = ['green' if val >= 0 else 'red' for val in df['macd_diff']]
             fig.add_trace(go.Bar(x=df['time'], y=df['macd_diff'], name='Hist', marker_color=colors), row=3, col=1)
         
-        # 4. Volume
         fig.add_trace(go.Bar(x=df['time'], y=df['volume'], name='Volume', marker_color='teal'), row=4, col=1)
-
         fig.update_layout(xaxis_rangeslider_visible=False, height=1000, template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -338,38 +322,31 @@ def analyze_symbol(symbol, client_args, scan_params):
         funding_map = scan_params['funding_map']
         candles_needed = scan_params['candles_needed']
         
-        # Configs
-        MIN_SCORE = scan_params.get('MIN_SCORE', 60)
-        RSI_ALERT_LEVEL = scan_params.get('RSI_ALERT_LEVEL', 30)
+        MIN_SCORE = scan_params.get('MIN_SCORE', 30) # Default lowered
+        RSI_ALERT_LEVEL = scan_params.get('RSI_ALERT_LEVEL', 35) # Default lowered
         MIN_RSI = scan_params.get('MIN_RSI', 70)
         MAX_RSI = scan_params.get('MAX_RSI', 90)
         OVERBOUGHT_VAL = scan_params.get('OVERBOUGHT_VAL', 70)
         OVERSOLD_VAL = scan_params.get('OVERSOLD_VAL', 30)
         TREND_TYPE = scan_params.get('TREND_TYPE', "Always ABOVE")
-        TREND_RSI_LEVEL = scan_params.get('TREND_RSI_LEVEL', 70)
+        TREND_RSI_LEVEL = scan_params.get('TREND_RSI_LEVEL', 65) # Relaxed
         TRAP_RSI_THRESHOLD = scan_params.get('TRAP_RSI_THRESHOLD', 70)
 
-        # 1. Fetch Data
         get_oi = (SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)")
         df = get_data_with_indicators(client, symbol, TIMEFRAME, MARKET_TYPE, limit=max(200, candles_needed), get_oi=get_oi)
         
         if df is None or len(df) < 30: return None
 
-        # Latest Values
         curr_rsi = df['rsi'].iloc[-1]
         prev_rsi = df['rsi'].iloc[-2]
         curr_price = df['close'].iloc[-1]
         curr_rvol = df['rvol'].iloc[-1]
-        
-        # Expert Indicators
         bb_lower = df['bb_lower'].iloc[-1]
         bb_upper = df['bb_upper'].iloc[-1]
         ema_200 = df['ema_200'].iloc[-1]
         adx = df['adx'].iloc[-1]
         curr_macd = df['macd'].iloc[-1]
         curr_signal = df['macd_signal'].iloc[-1]
-        
-        # CE Values
         ce_long = df['ce_long'].iloc[-1]
         ce_short = df['ce_short'].iloc[-1]
         
@@ -380,57 +357,33 @@ def analyze_symbol(symbol, client_args, scan_params):
             fr_val = funding_map[symbol]
             funding_rate_display = f"{fr_val * 100:.4f}%"
 
-        match_found = False
-        status_msg = ""
-        signal_type = "NEUTRAL"
-        group_tag = "Normal"
-        
+        match_found = False; status_msg = ""; signal_type = "NEUTRAL"; group_tag = "Normal"
         flip_time = "-"; old_funding = "-"; flip_rate = "-"; long_pct = 0.0; short_pct = 0.0; flip_type = "Neutral"
         flip_price_val = "N/A"; change_pct_str = "0.00%"
         nl_rsi_val = 0; ns_rsi_val = 0; cpd_rsi_val = 0; trap_message = ""
-        
-        expert_score = 0
-        expert_advice = ""
+        expert_score = 0; expert_advice = ""
 
-        # --- LOGIC SELECTION ---
         if SEARCH_MODE == "💎 Expert Confluence Score":
-            # 1. RSI (30 pts)
             if curr_rsi < 30: expert_score += 30
             elif curr_rsi > 70: expert_score -= 30
-            
-            # 2. Bollinger Bands (20 pts)
             if curr_price <= bb_lower * 1.01: expert_score += 20
             elif curr_price >= bb_upper * 0.99: expert_score -= 20
-            
-            # 3. Volume (15 pts)
             if curr_rvol > 2: expert_score += 15
-            
-            # 4. MACD (10 pts)
             if curr_macd > curr_signal: expert_score += 10
             else: expert_score -= 10
-            
-            # 5. Funding (15 pts)
             if fr_val < 0: expert_score += 15
-            
-            # 6. Chandelier Exit (CE) - NEW (10 pts)
             if curr_price > ce_long: expert_score += 10
             elif curr_price < ce_short: expert_score -= 10
             
             abs_score = abs(expert_score)
-            
             if abs_score >= MIN_SCORE:
                 match_found = True
-                if expert_score > 0:
-                    status_msg = f"💎 Strong Buy (Score: {expert_score})"
-                    signal_type = "BUY"; group_tag = "BuySignal"
-                else:
-                    status_msg = f"🐻 Strong Sell (Score: {abs(expert_score)})"
-                    signal_type = "SELL"; group_tag = "SellSignal"
+                if expert_score > 0: status_msg = f"💎 Buy (Score: {expert_score})"; signal_type = "BUY"; group_tag = "BuySignal"
+                else: status_msg = f"🐻 Sell (Score: {abs(expert_score)})"; signal_type = "SELL"; group_tag = "SellSignal"
                 
                 if adx > 25: expert_advice = "Strong Trend."
                 else: expert_advice = "Weak Trend."
-                
-                if signal_type == "BUY" and curr_price < ce_long: expert_advice += " ⚠️ Below CE Long (Risky)."
+                if signal_type == "BUY" and curr_price < ce_long: expert_advice += " ⚠️ Below CE."
 
         elif SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)":
             if MARKET_TYPE != "Futures": return None 
@@ -438,30 +391,21 @@ def analyze_symbol(symbol, client_args, scan_params):
                 nl_rsi_val = df['nl_rsi'].iloc[-1]
                 ns_rsi_val = df['ns_rsi'].iloc[-1]
                 if 'cpd_rsi' in df.columns: cpd_rsi_val = df['cpd_rsi'].iloc[-1]
-
-                if nl_rsi_val > TRAP_RSI_THRESHOLD:
-                    match_found = True; trap_message = "Crowded Longs (Dump Risk 📉)"; group_tag = "TrapLongs"; signal_type = "SELL"
-                elif ns_rsi_val > TRAP_RSI_THRESHOLD:
-                    match_found = True; trap_message = "Crowded Shorts (Squeeze Risk 🚀)"; group_tag = "TrapShorts"; signal_type = "BUY"
+                if nl_rsi_val > TRAP_RSI_THRESHOLD: match_found = True; trap_message = "Crowded Longs (Dump Risk 📉)"; group_tag = "TrapLongs"; signal_type = "SELL"
+                elif ns_rsi_val > TRAP_RSI_THRESHOLD: match_found = True; trap_message = "Crowded Shorts (Squeeze Risk 🚀)"; group_tag = "TrapShorts"; signal_type = "BUY"
 
         elif SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
             if MARKET_TYPE == "Futures":
                 hist_flip = get_historical_funding_flip(client, symbol, days=3)
                 if hist_flip:
-                    match_found = True
-                    status_msg = f"Flip: {hist_flip['Type']}"
-                    signal_type = "ALERT"
-                    flip_type = hist_flip['Type']
-                    flip_time = hist_flip['Flip Time']
-                    old_funding = hist_flip['Old Funding']
-                    flip_rate = hist_flip['Flip Rate']
+                    match_found = True; status_msg = f"Flip: {hist_flip['Type']}"; signal_type = "ALERT"; flip_type = hist_flip['Type']
+                    flip_time = hist_flip['Flip Time']; old_funding = hist_flip['Old Funding']; flip_rate = hist_flip['Flip Rate']
                     funding_rate_display = flip_rate
                     long_pct, short_pct = get_long_short_ratio(client, symbol)
                     try:
                         flip_kline = client.futures_klines(symbol=symbol, interval='1h', startTime=hist_flip['Timestamp'], limit=1)
                         if flip_kline:
-                            f_price = float(flip_kline[0][1])
-                            flip_price_val = f"{f_price}"
+                            f_price = float(flip_kline[0][1]); flip_price_val = f"{f_price}"
                             pct_change = ((curr_price - f_price) / f_price) * 100
                             trend_icon = "📈" if pct_change >= 0 else "📉"
                             change_pct_str = f"{pct_change:.2f}% {trend_icon}"
@@ -516,7 +460,7 @@ def analyze_symbol(symbol, client_args, scan_params):
                 "Market State": trap_message,
                 "NL RSI": round(nl_rsi_val, 2),
                 "NS RSI": round(ns_rsi_val, 2),
-                "CPD RSI": round(cpd_rsi_val, 2) if cpd_rsi_val else "-", # New CPD Column
+                "CPD RSI": round(cpd_rsi_val, 2) if cpd_rsi_val else "-",
                 "Score": abs(expert_score),
                 "Expert Advice": expert_advice,
                 "ADX": round(adx, 2),
@@ -526,7 +470,7 @@ def analyze_symbol(symbol, client_args, scan_params):
     except: return None
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance Expert Scanner 3.4")
+st.title(f"🤖 Binance Expert Scanner 3.5")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -578,15 +522,15 @@ if st.button("🔄 Start New Scan", type="primary"):
             'SEARCH_MODE': SEARCH_MODE,
             'funding_map': funding_map,
             'candles_needed': candles_needed,
-            'RSI_ALERT_LEVEL': locals().get('RSI_ALERT_LEVEL', 30),
+            'RSI_ALERT_LEVEL': locals().get('RSI_ALERT_LEVEL', 35),
             'MIN_RSI': locals().get('MIN_RSI', 70),
             'MAX_RSI': locals().get('MAX_RSI', 90),
             'OVERBOUGHT_VAL': locals().get('OVERBOUGHT_VAL', 70),
             'OVERSOLD_VAL': locals().get('OVERSOLD_VAL', 30),
             'TREND_TYPE': locals().get('TREND_TYPE', "Always ABOVE"),
-            'TREND_RSI_LEVEL': locals().get('TREND_RSI_LEVEL', 70),
+            'TREND_RSI_LEVEL': locals().get('TREND_RSI_LEVEL', 65),
             'TRAP_RSI_THRESHOLD': locals().get('TRAP_RSI_THRESHOLD', 70),
-            'MIN_SCORE': locals().get('MIN_SCORE', 60)
+            'MIN_SCORE': locals().get('MIN_SCORE', 30)
         }
 
         status_text.text(f"Scanning {total_symbols} coins (Parallel Mode)...")
@@ -598,6 +542,7 @@ if st.button("🔄 Start New Scan", type="primary"):
                 completed_count += 1
                 progress = completed_count / total_symbols
                 progress_bar.progress(progress)
+                status_text.text(f"Scanning {completed_count}/{total_symbols}...") # Progress Text
                 try:
                     result = future.result()
                     if result:
@@ -609,6 +554,9 @@ if st.button("🔄 Start New Scan", type="primary"):
         progress_bar.empty()
         status_text.success(f"✅ Scan Complete! Scanned {total_symbols} coins.")
         
+        if not alerts:
+            st.warning("⚠️ No signals found. Try lowering the 'Min Score' or adjusting thresholds in the sidebar.")
+
         if alerts and GSHEET_URL and AUTO_EXPORT:
             if send_to_google_sheet(alerts, GSHEET_URL): st.toast("✅ Google Sheet Updated!")
 
@@ -630,9 +578,7 @@ def highlight_ls(row):
 
 if st.session_state.scan_performed:
     alerts = st.session_state.scan_results
-    if not alerts:
-        st.warning("No signals found in the last scan.")
-    else:
+    if alerts:
         st.sidebar.divider()
         st.sidebar.subheader("📊 Chart Visualizer")
         coin_list = [item['Symbol'] for item in alerts]
