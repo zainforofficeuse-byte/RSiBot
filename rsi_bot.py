@@ -6,14 +6,14 @@ import ta
 import time
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import concurrent.futures 
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Pro Scanner 3.6",
+    page_title="Binance RSI Pro Scanner 3.10",
     page_icon="💎",
     layout="wide",
     initial_sidebar_state="expanded" 
@@ -36,7 +36,7 @@ if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Expert Settings 3.6")
+st.sidebar.title("⚙️ Expert Settings 3.10")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
@@ -67,20 +67,20 @@ st.sidebar.subheader("🔍 Strategy")
 SEARCH_MODE = st.sidebar.radio(
     "Select Strategy:",
     ["🔍 Single Coin Inspector", "💎 Expert Confluence Score", "📊 All-in-One Report", "Crossover Alert", "RSI Range", "Sustained Trend (Days)", "💸 Funding Flip Scanner (3 Days)", "🪤 Trap Master (Net Positions + CPD)"],
-    index=0 
+    index=1 
 )
 
-# DEFAULT VALUES RELAXED FOR BETTER RESULTS
+# DEFAULT VALUES
 if SEARCH_MODE == "🔍 Single Coin Inspector":
     st.sidebar.info("🕵️ Detailed analysis of a single specific coin.")
 
 elif SEARCH_MODE == "Expert Confluence Score":
-    st.sidebar.info("🏆 Score based on RSI, MACD, Volume, Funding & Chandelier Exit (CE).")
+    st.sidebar.info("🏆 Score based on RSI, Volume, Funding, CE & Trend Duration (How long ago trend flipped).")
     MIN_SCORE = st.sidebar.slider("Min Score to Show", 0, 100, 30, help="Lower this if no results appear.")
 
 elif SEARCH_MODE == "Crossover Alert":
     st.sidebar.info("🔔 Alert when RSI crosses BELOW level.")
-    RSI_ALERT_LEVEL = st.sidebar.number_input("RSI Cross Level", 1, 100, 35) # Relaxed to 35
+    RSI_ALERT_LEVEL = st.sidebar.number_input("RSI Cross Level", 1, 100, 35)
 elif SEARCH_MODE == "RSI Range":
     st.sidebar.info("↔️ Show coins inside a specific RSI Range.")
     col1, col2 = st.sidebar.columns(2)
@@ -90,7 +90,7 @@ elif SEARCH_MODE == "Sustained Trend (Days)":
     st.sidebar.info("📅 Find coins staying Above/Below RSI.")
     SUSTAINED_DAYS = st.sidebar.number_input("Duration (Days)", 1, 30, 3)
     TREND_TYPE = st.sidebar.selectbox("Condition", ["Always ABOVE", "Always BELOW"])
-    TREND_RSI_LEVEL = st.sidebar.number_input("RSI Threshold", 1, 100, 65) # Relaxed to 65
+    TREND_RSI_LEVEL = st.sidebar.number_input("RSI Threshold", 1, 100, 65)
 elif SEARCH_MODE == "📊 All-in-One Report":
     st.sidebar.info("📑 Analyze Market for Signals, Overbought & Oversold.")
     col1, col2 = st.sidebar.columns(2)
@@ -98,7 +98,7 @@ elif SEARCH_MODE == "📊 All-in-One Report":
     OVERSOLD_VAL = col2.number_input("Oversold (<)", 1, 50, 30)
     REPORT_DAYS = st.sidebar.number_input("Sustained Trend Days", 1, 10, 3)
 elif SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
-    st.sidebar.info("🔎 Finds Funding Flips with Price Change Analysis.")
+    st.sidebar.info("🔎 Finds Funding Flips and shows how long ago they happened.")
 elif SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)":
     st.sidebar.info("🧠 Analyzes Net Longs, Shorts & CPD to find Traps.")
     TRAP_RSI_THRESHOLD = st.sidebar.number_input("Overcrowded Threshold (RSI)", 50, 100, 70, help="Level above which positions are considered 'Trapped' or 'Heavy'.")
@@ -139,26 +139,46 @@ def play_sound_alert():
 def send_to_google_sheet(data, url):
     try:
         response = requests.post(url, json=data)
-        if response.status_code == 200:
-            return True
-        else:
-            st.error(f"Google Sheet Error: {response.text}")
-            return False
+        if response.status_code == 200: return True
+        else: st.error(f"Google Sheet Error: {response.text}"); return False
     except Exception as e:
-        st.error(f"Failed to upload to Sheet: {e}")
-        return False
+        st.error(f"Failed to upload to Sheet: {e}"); return False
 
 def calculate_chandelier_exit(df, period=22, multiplier=3.0):
     try:
         high_roll = df['high'].rolling(period).max()
         low_roll = df['low'].rolling(period).min()
         atr = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period).average_true_range()
-        
         df['ce_long'] = high_roll - (atr * multiplier)
         df['ce_short'] = low_roll + (atr * multiplier)
         return df
-    except:
-        return df
+    except: return df
+
+def calc_time_ago(timestamp_ms):
+    """Calculates how long ago the event happened"""
+    try:
+        if isinstance(timestamp_ms, pd.Timestamp):
+            timestamp_ms = timestamp_ms.value / 1000 / 1000 # Convert nanoseconds to milliseconds if needed, but here usually ts is needed
+            # Re-conversion for safety if input is datetime object
+            event_time = timestamp_ms # It's actually a datetime object from pandas
+        else:
+            event_time = datetime.utcfromtimestamp(timestamp_ms / 1000)
+            
+        now = datetime.utcnow()
+        # Ensure event_time is datetime
+        if not isinstance(event_time, datetime):
+             event_time = datetime.utcfromtimestamp(event_time / 1000)
+
+        diff = now - event_time
+        hours, remainder = divmod(diff.seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        
+        days = diff.days
+        if days > 0: return f"{days}d {hours}h ago"
+        elif hours > 0: return f"{hours}h {minutes}m ago"
+        elif minutes > 0: return f"{minutes}m ago"
+        else: return "Just now"
+    except: return "-"
 
 def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=False):
     try:
@@ -167,9 +187,7 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
         else:
             klines = client.futures_klines(symbol=symbol, interval=tf, limit=limit)
             
-        df = pd.DataFrame(klines, columns=[
-            'time','open','high','low','close','volume','close_time','qav','num_trades','tbv','tqv','ignore'
-        ])
+        df = pd.DataFrame(klines, columns=['time','open','high','low','close','volume','close_time','qav','num_trades','tbv','tqv','ignore'])
         df['time'] = pd.to_datetime(df['time'], unit='ms')
         cols = ['open','high','low','close','volume']
         df[cols] = df[cols].astype(float)
@@ -188,7 +206,6 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
         df['bb_lower'] = bb.bollinger_lband()
         
         df['ema_200'] = ta.trend.EMAIndicator(close=df['close'], window=200).ema_indicator()
-        
         adx = ta.trend.ADXIndicator(high=df['high'], low=df['low'], close=df['close'], window=14)
         df['adx'] = adx.adx()
 
@@ -217,17 +234,14 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
                 
                 df['net_longs'] = (longs_entering.fillna(0) - longs_exiting.fillna(0).abs()).cumsum()
                 df['net_shorts'] = (shorts_entering.fillna(0) - shorts_exiting.fillna(0).abs()).cumsum()
-                
                 df['cpd'] = df['net_longs'] - df['net_shorts']
                 
                 df['nl_rsi'] = ta.momentum.RSIIndicator(close=df['net_longs'], window=14).rsi()
                 df['ns_rsi'] = ta.momentum.RSIIndicator(close=df['net_shorts'], window=14).rsi()
                 df['cpd_rsi'] = ta.momentum.RSIIndicator(close=df['cpd'], window=14).rsi()
             except Exception: pass
-        
         return df
-    except:
-        return None
+    except: return None
 
 def check_funding_flip(client, symbol):
     try:
@@ -253,9 +267,10 @@ def get_historical_funding_flip(client, symbol, days=3):
             timestamp = rates[i]['fundingTime']
             if timestamp < cutoff_time: break
             if (prev_rate < 0 and curr_rate > 0) or (prev_rate > 0 and curr_rate < 0):
-                flip_time = datetime.utcfromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M')
+                flip_time = datetime.utcfromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M UTC')
                 return {
                     "Flip Time": flip_time,
+                    "Time Ago": calc_time_ago(timestamp),
                     "Old Funding": f"{prev_rate*100:.4f}%",
                     "Flip Rate": f"{curr_rate*100:.4f}%",
                     "Type": "Positive" if curr_rate > 0 else "Negative",
@@ -282,12 +297,10 @@ def plot_chart(client, symbol, tf, market_type):
 
         rows = 4
         titles = (f'{symbol} Price + CE', 'RSI (14)', 'MACD', 'Volume')
-        
         if is_trap_mode and 'nl_rsi' in df.columns:
             titles = (f'{symbol} Price', 'RSI (14)', 'Net Positions & CPD', 'Volume')
         
-        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, 
-                            subplot_titles=titles, row_width=[0.15, 0.15, 0.15, 0.55])
+        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, subplot_titles=titles, row_width=[0.15, 0.15, 0.15, 0.55])
 
         fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Price'), row=1, col=1)
         if 'ce_long' in df.columns:
@@ -302,8 +315,7 @@ def plot_chart(client, symbol, tf, market_type):
         if is_trap_mode and 'nl_rsi' in df.columns:
             fig.add_trace(go.Scatter(x=df['time'], y=df['nl_rsi'], name='Net Long RSI', line=dict(color='#00ff00', width=2)), row=3, col=1)
             fig.add_trace(go.Scatter(x=df['time'], y=df['ns_rsi'], name='Net Short RSI', line=dict(color='#ff0000', width=2)), row=3, col=1)
-            if 'cpd_rsi' in df.columns:
-                fig.add_trace(go.Scatter(x=df['time'], y=df['cpd_rsi'], name='CPD RSI (Delta)', line=dict(color='yellow', width=2, dash='dot')), row=3, col=1)
+            if 'cpd_rsi' in df.columns: fig.add_trace(go.Scatter(x=df['time'], y=df['cpd_rsi'], name='CPD RSI', line=dict(color='yellow', width=2, dash='dot')), row=3, col=1)
             fig.add_hline(y=80, line_dash="dot", line_color="white", row=3, col=1, annotation_text="Overcrowded")
         else:
             fig.add_trace(go.Scatter(x=df['time'], y=df['macd'], name='MACD', line=dict(color='blue', width=1.5)), row=3, col=1)
@@ -325,33 +337,26 @@ def analyze_symbol(symbol, client_args, scan_params):
         funding_map = scan_params['funding_map']
         candles_needed = scan_params['candles_needed']
         
-        MIN_SCORE = scan_params.get('MIN_SCORE', 30) # Default lowered
-        RSI_ALERT_LEVEL = scan_params.get('RSI_ALERT_LEVEL', 35) # Default lowered
+        MIN_SCORE = scan_params.get('MIN_SCORE', 30)
+        RSI_ALERT_LEVEL = scan_params.get('RSI_ALERT_LEVEL', 35)
         MIN_RSI = scan_params.get('MIN_RSI', 70)
         MAX_RSI = scan_params.get('MAX_RSI', 90)
         OVERBOUGHT_VAL = scan_params.get('OVERBOUGHT_VAL', 70)
         OVERSOLD_VAL = scan_params.get('OVERSOLD_VAL', 30)
         TREND_TYPE = scan_params.get('TREND_TYPE', "Always ABOVE")
-        TREND_RSI_LEVEL = scan_params.get('TREND_RSI_LEVEL', 65) # Relaxed
+        TREND_RSI_LEVEL = scan_params.get('TREND_RSI_LEVEL', 65)
         TRAP_RSI_THRESHOLD = scan_params.get('TRAP_RSI_THRESHOLD', 70)
 
         get_oi = (SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)")
         df = get_data_with_indicators(client, symbol, TIMEFRAME, MARKET_TYPE, limit=max(200, candles_needed), get_oi=get_oi)
-        
         if df is None or len(df) < 30: return None
 
-        curr_rsi = df['rsi'].iloc[-1]
-        prev_rsi = df['rsi'].iloc[-2]
-        curr_price = df['close'].iloc[-1]
-        curr_rvol = df['rvol'].iloc[-1]
-        bb_lower = df['bb_lower'].iloc[-1]
-        bb_upper = df['bb_upper'].iloc[-1]
-        ema_200 = df['ema_200'].iloc[-1]
-        adx = df['adx'].iloc[-1]
-        curr_macd = df['macd'].iloc[-1]
-        curr_signal = df['macd_signal'].iloc[-1]
-        ce_long = df['ce_long'].iloc[-1]
-        ce_short = df['ce_short'].iloc[-1]
+        curr_rsi = df['rsi'].iloc[-1]; prev_rsi = df['rsi'].iloc[-2]
+        curr_price = df['close'].iloc[-1]; curr_rvol = df['rvol'].iloc[-1]
+        bb_lower = df['bb_lower'].iloc[-1]; bb_upper = df['bb_upper'].iloc[-1]
+        ema_200 = df['ema_200'].iloc[-1]; adx = df['adx'].iloc[-1]
+        curr_macd = df['macd'].iloc[-1]; curr_signal = df['macd_signal'].iloc[-1]
+        ce_long = df['ce_long'].iloc[-1]; ce_short = df['ce_short'].iloc[-1]
         
         macd_trend = "BULLISH 🟢" if curr_macd > curr_signal else "BEARISH 🔴"
         funding_rate_display = "N/A"
@@ -361,12 +366,29 @@ def analyze_symbol(symbol, client_args, scan_params):
             funding_rate_display = f"{fr_val * 100:.4f}%"
 
         match_found = False; status_msg = ""; signal_type = "NEUTRAL"; group_tag = "Normal"
-        flip_time = "-"; old_funding = "-"; flip_rate = "-"; long_pct = 0.0; short_pct = 0.0; flip_type = "Neutral"
-        flip_price_val = "N/A"; change_pct_str = "0.00%"
+        flip_time = "-"; flip_ago = "-"; old_funding = "-"; flip_rate = "-"; long_pct = 0.0; short_pct = 0.0; flip_type = "Neutral"
         nl_rsi_val = 0; ns_rsi_val = 0; cpd_rsi_val = 0; trap_message = ""
         expert_score = 0; expert_advice = ""
+        trend_since_str = "-"
 
         if SEARCH_MODE == "💎 Expert Confluence Score":
+            # --- CALCULATE TREND DURATION (When did MACD last cross?) ---
+            try:
+                # Find the last crossover index
+                # Reverse iterate to find change in condition
+                current_state = curr_macd > curr_signal
+                crossover_idx = -1
+                for i in range(len(df)-2, 0, -1):
+                    prev_state = df['macd'].iloc[i] > df['macd_signal'].iloc[i]
+                    if prev_state != current_state:
+                        crossover_idx = i
+                        break
+                
+                if crossover_idx != -1:
+                    cross_time = df['time'].iloc[crossover_idx] # Timestamp
+                    trend_since_str = calc_time_ago(cross_time)
+            except: pass
+            
             if curr_rsi < 30: expert_score += 30
             elif curr_rsi > 70: expert_score -= 30
             if curr_price <= bb_lower * 1.01: expert_score += 20
@@ -383,7 +405,6 @@ def analyze_symbol(symbol, client_args, scan_params):
                 match_found = True
                 if expert_score > 0: status_msg = f"💎 Buy (Score: {expert_score})"; signal_type = "BUY"; group_tag = "BuySignal"
                 else: status_msg = f"🐻 Sell (Score: {abs(expert_score)})"; signal_type = "SELL"; group_tag = "SellSignal"
-                
                 if adx > 25: expert_advice = "Strong Trend."
                 else: expert_advice = "Weak Trend."
                 if signal_type == "BUY" and curr_price < ce_long: expert_advice += " ⚠️ Below CE."
@@ -398,21 +419,19 @@ def analyze_symbol(symbol, client_args, scan_params):
                 elif ns_rsi_val > TRAP_RSI_THRESHOLD: match_found = True; trap_message = "Crowded Shorts (Squeeze Risk 🚀)"; group_tag = "TrapShorts"; signal_type = "BUY"
 
         elif SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
-            if MARKET_TYPE == "Futures":
+            if MARKET_TYPE == "Futures" and get_historical_funding_flip:
                 hist_flip = get_historical_funding_flip(client, symbol, days=3)
                 if hist_flip:
-                    match_found = True; status_msg = f"Flip: {hist_flip['Type']}"; signal_type = "ALERT"; flip_type = hist_flip['Type']
-                    flip_time = hist_flip['Flip Time']; old_funding = hist_flip['Old Funding']; flip_rate = hist_flip['Flip Rate']
+                    match_found = True
+                    status_msg = f"Flip: {hist_flip['Type']}"
+                    signal_type = "ALERT"
+                    flip_type = hist_flip['Type']
+                    flip_time = hist_flip['Flip Time']
+                    flip_ago = hist_flip['Time Ago']
+                    old_funding = hist_flip['Old Funding']
+                    flip_rate = hist_flip['Flip Rate']
                     funding_rate_display = flip_rate
                     long_pct, short_pct = get_long_short_ratio(client, symbol)
-                    try:
-                        flip_kline = client.futures_klines(symbol=symbol, interval='1h', startTime=hist_flip['Timestamp'], limit=1)
-                        if flip_kline:
-                            f_price = float(flip_kline[0][1]); flip_price_val = f"{f_price}"
-                            pct_change = ((curr_price - f_price) / f_price) * 100
-                            trend_icon = "📈" if pct_change >= 0 else "📉"
-                            change_pct_str = f"{pct_change:.2f}% {trend_icon}"
-                    except: pass
 
         elif SEARCH_MODE == "📊 All-in-One Report":
             if prev_rsi > OVERSOLD_VAL and curr_rsi <= OVERSOLD_VAL: match_found = True; status_msg = "📉 BREAKDOWN"; signal_type = "BUY"; group_tag = "Signal"
@@ -451,29 +470,25 @@ def analyze_symbol(symbol, client_args, scan_params):
                 "Group": group_tag,
                 "Flip Type": flip_type,
                 "Flip Time": flip_time,
+                "Flip Ago": flip_ago,
                 "Old Funding": old_funding,
                 "Current Funding": flip_rate if SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)" else funding_rate_display,
                 "Long %": f"{long_pct:.1f}%",
                 "Short %": f"{short_pct:.1f}%",
-                "_long_val": long_pct,
-                "_short_val": short_pct,
-                "has_funding_flip_alert": "Flip" in funding_rate_display,
-                "Flip Price": flip_price_val,
-                "Change %": change_pct_str,
+                "_long_val": long_pct, "_short_val": short_pct,
                 "Market State": trap_message,
-                "NL RSI": round(nl_rsi_val, 2),
-                "NS RSI": round(ns_rsi_val, 2),
-                "CPD RSI": round(cpd_rsi_val, 2) if cpd_rsi_val else "-",
+                "NL RSI": round(nl_rsi_val, 2), "NS RSI": round(ns_rsi_val, 2), "CPD RSI": round(cpd_rsi_val, 2) if cpd_rsi_val else "-",
                 "Score": abs(expert_score),
                 "Expert Advice": expert_advice,
-                "ADX": round(adx, 2),
-                "EMA200": round(ema_200, 4)
+                "ADX": round(adx, 2), "EMA200": round(ema_200, 4),
+                # Trend Since (Renamed concept)
+                "Trend Since": trend_since_str
             }
         return None
     except: return None
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance Expert Scanner 3.6")
+st.title(f"🤖 Binance Expert Scanner 3.10")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -487,8 +502,6 @@ except Exception as e:
 # --- SINGLE COIN INSPECTOR LOGIC ---
 if SEARCH_MODE == "🔍 Single Coin Inspector":
     st.markdown(f"### 🔎 Single Coin Inspector ({MARKET_TYPE})")
-    
-    # Fetch symbols for dropdown
     try:
         if MARKET_TYPE == "Spot": info = client.get_exchange_info()
         else: info = client.futures_exchange_info()
@@ -499,14 +512,11 @@ if SEARCH_MODE == "🔍 Single Coin Inspector":
     with col_ins1:
         selected_insp_coin = st.selectbox("Select Coin:", symbols_list)
     with col_ins2:
-        st.write("") # Spacer
-        st.write("") # Spacer
+        st.write(""); st.write("")
         inspect_btn = st.button("🔍 Analyze Coin", type="primary")
         
     if inspect_btn and selected_insp_coin:
-        st.session_state.scan_results = [] # Clear scanner results to avoid confusion
-        
-        # Funding Rates (if futures)
+        st.session_state.scan_results = []
         funding_map = {}
         if MARKET_TYPE == "Futures":
             try:
@@ -514,64 +524,45 @@ if SEARCH_MODE == "🔍 Single Coin Inspector":
                 if fr: funding_map[selected_insp_coin] = float(fr[0]['fundingRate'])
             except: pass
             
-        # Re-use analyze logic or just fetch directly
-        # Let's fetch directly to show EVERYTHING
         with st.spinner(f"Analyzing {selected_insp_coin}..."):
             df = get_data_with_indicators(client, selected_insp_coin, TIMEFRAME, MARKET_TYPE, limit=200, get_oi=(MARKET_TYPE=="Futures"))
-            
             if df is not None:
                 curr = df.iloc[-1]
-                
-                # --- METRICS ROW 1 ---
                 m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Price", f"${curr['close']}")
                 m2.metric("RSI (14)", f"{curr['rsi']:.2f}")
                 m3.metric("RVOL", f"{curr['rvol']:.2f}")
                 m4.metric("ADX", f"{curr['adx']:.2f}")
-                
                 trend = "Bullish" if curr['macd'] > curr['macd_signal'] else "Bearish"
                 m5.metric("MACD Trend", trend)
-                
-                # --- METRICS ROW 2 (Futures Specific) ---
                 if MARKET_TYPE == "Futures":
                     st.divider()
                     f1, f2, f3, f4, f5 = st.columns(5)
                     fr_val = funding_map.get(selected_insp_coin, 0)
                     f1.metric("Funding Rate", f"{fr_val*100:.4f}%")
-                    
                     l_ratio, s_ratio = get_long_short_ratio(client, selected_insp_coin)
                     f2.metric("Long/Short Ratio", f"{l_ratio:.1f}% / {s_ratio:.1f}%")
-                    
                     if 'nl_rsi' in df.columns:
                         f3.metric("Net Long RSI", f"{curr['nl_rsi']:.2f}")
                         f4.metric("Net Short RSI", f"{curr['ns_rsi']:.2f}")
                         f5.metric("CPD RSI", f"{curr['cpd_rsi']:.2f}")
-                
-                # --- CHART ---
                 st.divider()
                 st.subheader("Price & Indicator Analysis")
                 plot_chart(client, selected_insp_coin, TIMEFRAME, MARKET_TYPE)
-                
-            else:
-                st.error("Failed to fetch data for this coin.")
+            else: st.error("Failed to fetch data.")
 
-# --- BULK SCANNER LOGIC (Original) ---
+# --- BULK SCANNER LOGIC ---
 else:
     if st.button("🔄 Start New Scan", type="primary"):
         st.session_state.scan_results = []
         st.session_state.scan_performed = False
-
-        if USE_US_BINANCE and MARKET_TYPE == "Futures":
-            st.error("❌ Binance.US does not support Futures."); st.stop()
-
-        status_text = st.empty()
-        progress_bar = st.progress(0)
+        if USE_US_BINANCE and MARKET_TYPE == "Futures": st.error("❌ Binance.US does not support Futures."); st.stop()
+        status_text = st.empty(); progress_bar = st.progress(0)
         
         try:
             status_text.text(f"Fetching {MARKET_TYPE} pairs...")
             funding_map = {}
-            if MARKET_TYPE == "Spot": 
-                exchange_info = client.get_exchange_info()
+            if MARKET_TYPE == "Spot": exchange_info = client.get_exchange_info()
             else: 
                 exchange_info = client.futures_exchange_info()
                 try:
@@ -589,7 +580,6 @@ else:
 
             alerts = []
             total_symbols = len(symbols)
-            sound_triggered = False
             
             scan_params = {
                 'client': client,
@@ -618,29 +608,22 @@ else:
                     completed_count += 1
                     progress = completed_count / total_symbols
                     progress_bar.progress(progress)
-                    status_text.text(f"Scanning {completed_count}/{total_symbols}...") # Progress Text
+                    status_text.text(f"Scanning {completed_count}/{total_symbols}...") 
                     try:
                         result = future.result()
-                        if result:
-                            alerts.append(result)
-                            if result.get("has_funding_flip_alert") and ENABLE_SOUND and not sound_triggered:
-                                play_sound_alert(); sound_triggered = True; st.toast(f"🔔 Funding Change: {result['Symbol']}")
+                        if result: alerts.append(result)
                     except Exception as exc: pass 
 
             progress_bar.empty()
             status_text.success(f"✅ Scan Complete! Scanned {total_symbols} coins.")
             
-            if not alerts:
-                st.warning("⚠️ No signals found. Try lowering the 'Min Score' or adjusting thresholds in the sidebar.")
-
+            if not alerts: st.warning("⚠️ No signals found. Try lowering the 'Min Score' or adjusting thresholds.")
             if alerts and GSHEET_URL and AUTO_EXPORT:
                 if send_to_google_sheet(alerts, GSHEET_URL): st.toast("✅ Google Sheet Updated!")
 
             st.session_state.scan_results = alerts
             st.session_state.scan_performed = True
-                
-        except Exception as e:
-            st.error(f"Error: {e}")
+        except Exception as e: st.error(f"Error: {e}")
 
 def highlight_ls(row):
     styles = [''] * len(row)
@@ -667,11 +650,13 @@ if st.session_state.scan_performed and SEARCH_MODE != "🔍 Single Coin Inspecto
             df_res = pd.DataFrame(alerts)
             
             if SEARCH_MODE == "💎 Expert Confluence Score":
-                st.info("💡 **Score Breakdown:** RSI (+30), Bollinger (+20), Neg Funding (+15), Vol (+15), MACD (+10), Chandelier Exit (+10).")
-                cols_to_show = ['Symbol', 'Price', 'Score', 'Expert Advice', 'RSI', 'Trend (MACD)', 'Signal', 'ADX']
+                st.info("💡 Score based on Multi-Factor Analysis.")
+                cols_to_show = ['Symbol', 'Price', 'Score', 'Expert Advice', 'Trend Since', 'Flip Ago', 'RSI', 'Trend (MACD)', 'Signal', 'ADX']
+                # Ensure columns exist before display
+                cols_to_show = [c for c in cols_to_show if c in df_res.columns]
+                
                 df_buy = df_res[df_res['Signal'] == 'BUY'].sort_values("Score", ascending=False)
                 df_sell = df_res[df_res['Signal'] == 'SELL'].sort_values("Score", ascending=False)
-                
                 if not df_buy.empty:
                     st.subheader("🟢 Top BUY Candidates")
                     st.dataframe(df_buy[cols_to_show], use_container_width=True)
@@ -680,12 +665,12 @@ if st.session_state.scan_performed and SEARCH_MODE != "🔍 Single Coin Inspecto
                     st.dataframe(df_sell[cols_to_show], use_container_width=True)
 
             elif SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)":
-                st.info("🔎 **Report Guide:**\n- **Crowded Shorts (Squeeze Risk):** Shorts bohat zyada hain, price uper ja sakti hai.\n- **Crowded Longs (Dump Risk):** Longs bohat zyada hain, price gir sakti hai.")
+                st.info("🔎 **Report Guide:**\n- **Crowded Shorts (Squeeze Risk):** Shorts bohat zyada hain.\n- **Crowded Longs (Dump Risk):** Longs bohat zyada hain.")
                 cols_to_show = ['Symbol', 'Price', 'Market State', 'NL RSI', 'NS RSI', 'CPD RSI', 'Signal']
                 st.dataframe(df_res[cols_to_show], use_container_width=True)
 
             elif SEARCH_MODE == "💸 Funding Flip Scanner (3 Days)":
-                cols_to_show = ['Symbol', 'Price', 'Flip Time', 'Flip Price', 'Change %', 'Old Funding', 'Current Funding', 'Long %', 'Short %', 'Trend (MACD)', '_long_val', '_short_val', 'Flip Type']
+                cols_to_show = ['Symbol', 'Price', 'Flip Time', 'Flip Ago', 'Old Funding', 'Current Funding', 'Long %', 'Short %', 'Trend (MACD)', '_long_val', '_short_val', 'Flip Type']
                 cols_to_show = [c for c in cols_to_show if c in df_res.columns]
                 df_pos = df_res[df_res['Flip Type'] == "Positive"]
                 df_neg = df_res[df_res['Flip Type'] == "Negative"]
