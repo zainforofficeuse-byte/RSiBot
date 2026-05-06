@@ -49,7 +49,7 @@ with st.sidebar.expander("🔐 API Keys (Optional)", expanded=False):
     USER_API_KEY = st.text_input("API Key", type="password")
     USER_API_SECRET = st.text_input("API Secret", type="password")
 
-PROXY_URL = st.sidebar.text_input("Proxy URL (Optional)", placeholder="http://user:pass@ip:port")
+PROXY_URL = st.sidebar.text_input("Proxy URL (Optional)", placeholder="http://user:pass@ip:port", help="Agar Binance aapke IP/Server ko block kar raha hai, to yahan kisi aur country ka proxy lagayen.")
 
 st.sidebar.divider()
 
@@ -569,9 +569,24 @@ if PROXY_URL: st.info("🌐 Using Proxy")
 
 try:
     client = init_client(USE_US_BINANCE, PROXY_URL, USER_API_KEY, USER_API_SECRET)
+    # Ping api to check if location is restricted
+    client.ping()
+except BinanceAPIException as e:
+    if "restricted location" in str(e).lower() or "451" in str(e):
+        st.error("❌ **Location Restriction Error (Binance Blocked)**")
+        st.info("💡 **Kyun aaya yeh error?**\nAapka internet IP (ya wo server jahan yeh bot chal raha hai, jaise Streamlit Cloud) kisi aisi jagah ka hai jahan Binance ban hai (e.g., USA).\n\n**🛠️ Iska Hal (Solutions):**\n1. **Proxy Use Karein:** Sidebar mein 'Proxy URL' ke andar kisi permitted country ka working proxy daalein (e.g. `http://user:pass@ip:port`).\n2. **Binance.US Use Karein:** Agar aap sirf Spot trading dekhna chahte hain, to sidebar se 'Use Binance.US' par tick lagayen.\n3. **Local PC Pe Chalayen:** Agar aap isey kisi cloud server pe host kar rahe hain, to isay wahan se hata kar apne Local Computer (PC/Laptop) par run karein.")
+        st.stop()
+    else:
+        st.error(f"❌ Binance API Error: {e}")
+        st.stop()
 except Exception as e:
-    st.error(f"❌ Connection Error: {e}")
-    st.stop()
+    if "restricted location" in str(e).lower():
+        st.error("❌ **Location Restriction Error (Binance Blocked)**")
+        st.info("💡 **Kyun aaya yeh error?**\nAapka internet IP (ya wo server jahan yeh bot chal raha hai, jaise Streamlit Cloud) kisi aisi jagah ka hai jahan Binance ban hai (e.g., USA).\n\n**🛠️ Iska Hal (Solutions):**\n1. **Proxy Use Karein:** Sidebar mein 'Proxy URL' ke andar kisi permitted country ka working proxy daalein (e.g. `http://user:pass@ip:port`).\n2. **Binance.US Use Karein:** Agar aap sirf Spot trading dekhna chahte hain, to sidebar se 'Use Binance.US' par tick lagayen.\n3. **Local PC Pe Chalayen:** Agar aap isey kisi cloud server pe host kar rahe hain, to isay wahan se hata kar apne Local Computer (PC/Laptop) par run karein.")
+        st.stop()
+    else:
+        st.error(f"❌ Connection Error: {e}")
+        st.stop()
 
 # --- SINGLE COIN INSPECTOR LOGIC ---
 if SEARCH_MODE == "🔍 Single Coin Inspector":
@@ -580,7 +595,9 @@ if SEARCH_MODE == "🔍 Single Coin Inspector":
         if MARKET_TYPE == "Spot": info = client.get_exchange_info()
         else: info = client.futures_exchange_info()
         symbols_list = [s['symbol'] for s in info['symbols'] if s['symbol'].endswith('USDT') and s['status'] == 'TRADING']
-    except: symbols_list = []
+    except Exception as e:
+        st.error(f"Failed to fetch symbols: {e}")
+        symbols_list = []
     
     col_ins1, col_ins2 = st.columns([3, 1])
     with col_ins1:
