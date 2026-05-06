@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 import pandas as pd
@@ -13,7 +14,7 @@ import concurrent.futures
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
-    page_title="Binance RSI Pro Scanner 3.10",
+    page_title="Binance RSI Pro Scanner 3.12",
     page_icon="💎",
     layout="wide",
     initial_sidebar_state="expanded" 
@@ -36,7 +37,7 @@ if 'scan_performed' not in st.session_state:
     st.session_state.scan_performed = False
 
 # --- SIDEBAR SETTINGS ---
-st.sidebar.title("⚙️ Expert Settings 3.10")
+st.sidebar.title("⚙️ Expert Settings 3.12")
 
 # 1. Connection
 st.sidebar.subheader("🔌 Connection")
@@ -75,7 +76,7 @@ if SEARCH_MODE == "🔍 Single Coin Inspector":
     st.sidebar.info("🕵️ Detailed analysis of a single specific coin.")
 
 elif SEARCH_MODE == "Expert Confluence Score":
-    st.sidebar.info("🏆 Score based on RSI, Volume, Funding, CE & Trend Duration (How long ago trend flipped).")
+    st.sidebar.info("🏆 Score based on RSI, Volume, CDV, Funding, CE & Trend Duration.")
     MIN_SCORE = st.sidebar.slider("Min Score to Show", 0, 100, 30, help="Lower this if no results appear.")
 
 elif SEARCH_MODE == "Crossover Alert":
@@ -155,17 +156,14 @@ def calculate_chandelier_exit(df, period=22, multiplier=3.0):
     except: return df
 
 def calc_time_ago(timestamp_ms):
-    """Calculates how long ago the event happened"""
     try:
         if isinstance(timestamp_ms, pd.Timestamp):
-            timestamp_ms = timestamp_ms.value / 1000 / 1000 # Convert nanoseconds to milliseconds if needed, but here usually ts is needed
-            # Re-conversion for safety if input is datetime object
-            event_time = timestamp_ms # It's actually a datetime object from pandas
+            timestamp_ms = timestamp_ms.value / 1000 / 1000 
+            event_time = timestamp_ms 
         else:
             event_time = datetime.utcfromtimestamp(timestamp_ms / 1000)
             
         now = datetime.utcnow()
-        # Ensure event_time is datetime
         if not isinstance(event_time, datetime):
              event_time = datetime.utcfromtimestamp(event_time / 1000)
 
@@ -187,10 +185,18 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
         else:
             klines = client.futures_klines(symbol=symbol, interval=tf, limit=limit)
             
+        # tbv = Taker buy base asset volume
         df = pd.DataFrame(klines, columns=['time','open','high','low','close','volume','close_time','qav','num_trades','tbv','tqv','ignore'])
         df['time'] = pd.to_datetime(df['time'], unit='ms')
-        cols = ['open','high','low','close','volume']
+        cols = ['open','high','low','close','volume', 'tbv']
         df[cols] = df[cols].astype(float)
+        
+        # --- CDV (Cumulative Delta Volume) Calculation ---
+        df['taker_buy_vol'] = df['tbv']
+        df['taker_sell_vol'] = df['volume'] - df['tbv']
+        df['delta'] = df['taker_buy_vol'] - df['taker_sell_vol']
+        df['cdv'] = df['delta'].cumsum() # CDV line
+        df['cdv_sma'] = df['cdv'].rolling(window=20).mean() # CDV trendline
         
         df['rsi'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
         df['vol_sma'] = df['volume'].rolling(window=20).mean()
@@ -234,11 +240,11 @@ def get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=
                 
                 df['net_longs'] = (longs_entering.fillna(0) - longs_exiting.fillna(0).abs()).cumsum()
                 df['net_shorts'] = (shorts_entering.fillna(0) - shorts_exiting.fillna(0).abs()).cumsum()
-                df['cpd'] = df['net_longs'] - df['net_shorts']
+                df['oi_cpd'] = df['net_longs'] - df['net_shorts']
                 
                 df['nl_rsi'] = ta.momentum.RSIIndicator(close=df['net_longs'], window=14).rsi()
                 df['ns_rsi'] = ta.momentum.RSIIndicator(close=df['net_shorts'], window=14).rsi()
-                df['cpd_rsi'] = ta.momentum.RSIIndicator(close=df['cpd'], window=14).rsi()
+                df['cpd_rsi'] = ta.momentum.RSIIndicator(close=df['oi_cpd'], window=14).rsi()
             except Exception: pass
         return df
     except: return None
@@ -289,33 +295,85 @@ def get_long_short_ratio(client, symbol):
         return 0, 0
     except: return 0, 0
 
+# --- TRADINGVIEW WIDGET ---
+def render_tradingview_widget(symbol, tf_label, market_type):
+    # Mapping our timeframe to TV timeframe
+    tv_tf_map = {
+        "15 Minutes": "15",
+        "1 Hour": "60",
+        "4 Hours": "240",
+        "12 Hours": "720",
+        "1 Day": "D"
+    }
+    tv_interval = tv_tf_map.get(tf_label, "60")
+    
+    # Format symbol for TV (BINANCE:BTCUSDT or BINANCE:BTCUSDT.P for futures)
+    tv_symbol = f"BINANCE:{symbol}"
+    if market_type == "Futures":
+        tv_symbol = f"BINANCE:{symbol}.P"
+
+    html_code = f"""
+    <!-- TradingView Widget BEGIN -->
+    <div class="tradingview-widget-container" style="height: 600px; width: 100%;">
+      <div id="tradingview_{symbol}" style="height: calc(100% - 32px); width: 100%;"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+      <script type="text/javascript">
+      new TradingView.widget(
+      {{
+      "autosize": true,
+      "symbol": "{tv_symbol}",
+      "interval": "{tv_interval}",
+      "timezone": "Etc/UTC",
+      "theme": "dark",
+      "style": "1",
+      "locale": "en",
+      "enable_publishing": false,
+      "backgroundColor": "rgba(14, 17, 23, 1)",
+      "gridColor": "rgba(42, 46, 57, 0.06)",
+      "hide_top_toolbar": false,
+      "hide_legend": false,
+      "save_image": false,
+      "container_id": "tradingview_{symbol}"
+    }}
+      );
+      </script>
+    </div>
+    <!-- TradingView Widget END -->
+    """
+    components.html(html_code, height=600)
+
 def plot_chart(client, symbol, tf, market_type):
     with st.spinner(f"Loading Chart for {symbol}..."):
         is_trap_mode = (SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)") or (SEARCH_MODE == "🔍 Single Coin Inspector" and MARKET_TYPE == "Futures")
         df = get_data_with_indicators(client, symbol, tf, market_type, limit=200, get_oi=is_trap_mode)
         if df is None: st.error("Could not load chart data."); return
 
-        rows = 4
-        titles = (f'{symbol} Price + CE', 'RSI (14)', 'MACD', 'Volume')
+        # Added 5th Row for CDV
+        rows = 5
+        titles = (f'{symbol} Price + CE', 'RSI (14)', 'MACD / Signals', 'Cum. Delta Volume (CDV)', 'Volume')
         if is_trap_mode and 'nl_rsi' in df.columns:
-            titles = (f'{symbol} Price', 'RSI (14)', 'Net Positions & CPD', 'Volume')
+            titles = (f'{symbol} Price', 'RSI (14)', 'Net Positions', 'Cum. Delta Volume (CDV)', 'Volume')
         
-        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, subplot_titles=titles, row_width=[0.15, 0.15, 0.15, 0.55])
+        # Row widths: bottom to top [Vol, CDV, MACD, RSI, Price] -> sum = 1.0
+        fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.03, subplot_titles=titles, row_width=[0.1, 0.15, 0.15, 0.15, 0.45])
 
+        # Row 1: Price
         fig.add_trace(go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Price'), row=1, col=1)
         if 'ce_long' in df.columns:
             fig.add_trace(go.Scatter(x=df['time'], y=df['ce_long'], name='CE Long', line=dict(color='green', width=1, dash='dot')), row=1, col=1)
             fig.add_trace(go.Scatter(x=df['time'], y=df['ce_short'], name='CE Short', line=dict(color='red', width=1, dash='dot')), row=1, col=1)
         fig.add_trace(go.Scatter(x=df['time'], y=df['ema_200'], name='EMA 200', line=dict(color='orange', width=2)), row=1, col=1)
 
+        # Row 2: RSI
         fig.add_trace(go.Scatter(x=df['time'], y=df['rsi'], name='RSI', line=dict(color='purple', width=2)), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
+        # Row 3: MACD / Net Pos
         if is_trap_mode and 'nl_rsi' in df.columns:
             fig.add_trace(go.Scatter(x=df['time'], y=df['nl_rsi'], name='Net Long RSI', line=dict(color='#00ff00', width=2)), row=3, col=1)
             fig.add_trace(go.Scatter(x=df['time'], y=df['ns_rsi'], name='Net Short RSI', line=dict(color='#ff0000', width=2)), row=3, col=1)
-            if 'cpd_rsi' in df.columns: fig.add_trace(go.Scatter(x=df['time'], y=df['cpd_rsi'], name='CPD RSI', line=dict(color='yellow', width=2, dash='dot')), row=3, col=1)
+            if 'cpd_rsi' in df.columns: fig.add_trace(go.Scatter(x=df['time'], y=df['cpd_rsi'], name='OI CPD RSI', line=dict(color='orange', width=2, dash='dot')), row=3, col=1)
             fig.add_hline(y=80, line_dash="dot", line_color="white", row=3, col=1, annotation_text="Overcrowded")
         else:
             fig.add_trace(go.Scatter(x=df['time'], y=df['macd'], name='MACD', line=dict(color='blue', width=1.5)), row=3, col=1)
@@ -323,8 +381,14 @@ def plot_chart(client, symbol, tf, market_type):
             colors = ['green' if val >= 0 else 'red' for val in df['macd_diff']]
             fig.add_trace(go.Bar(x=df['time'], y=df['macd_diff'], name='Hist', marker_color=colors), row=3, col=1)
         
-        fig.add_trace(go.Bar(x=df['time'], y=df['volume'], name='Volume', marker_color='teal'), row=4, col=1)
-        fig.update_layout(xaxis_rangeslider_visible=False, height=1000, template="plotly_dark")
+        # Row 4: CDV (New)
+        fig.add_trace(go.Scatter(x=df['time'], y=df['cdv'], name='CDV', line=dict(color='cyan', width=2)), row=4, col=1)
+        fig.add_trace(go.Scatter(x=df['time'], y=df['cdv_sma'], name='CDV Trend', line=dict(color='white', width=1, dash='dot')), row=4, col=1)
+        
+        # Row 5: Volume
+        fig.add_trace(go.Bar(x=df['time'], y=df['volume'], name='Volume', marker_color='teal'), row=5, col=1)
+        
+        fig.update_layout(xaxis_rangeslider_visible=False, height=1200, template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
 
 # --- WORKER FUNCTION ---
@@ -358,6 +422,11 @@ def analyze_symbol(symbol, client_args, scan_params):
         curr_macd = df['macd'].iloc[-1]; curr_signal = df['macd_signal'].iloc[-1]
         ce_long = df['ce_long'].iloc[-1]; ce_short = df['ce_short'].iloc[-1]
         
+        # CDV Trend Logic
+        curr_cdv = df['cdv'].iloc[-1]
+        curr_cdv_sma = df['cdv_sma'].iloc[-1]
+        cdv_trend = "UP 📈" if curr_cdv > curr_cdv_sma else "DOWN 📉"
+
         macd_trend = "BULLISH 🟢" if curr_macd > curr_signal else "BEARISH 🔴"
         funding_rate_display = "N/A"
         fr_val = 0
@@ -372,10 +441,7 @@ def analyze_symbol(symbol, client_args, scan_params):
         trend_since_str = "-"
 
         if SEARCH_MODE == "💎 Expert Confluence Score":
-            # --- CALCULATE TREND DURATION (When did MACD last cross?) ---
             try:
-                # Find the last crossover index
-                # Reverse iterate to find change in condition
                 current_state = curr_macd > curr_signal
                 crossover_idx = -1
                 for i in range(len(df)-2, 0, -1):
@@ -383,9 +449,8 @@ def analyze_symbol(symbol, client_args, scan_params):
                     if prev_state != current_state:
                         crossover_idx = i
                         break
-                
                 if crossover_idx != -1:
-                    cross_time = df['time'].iloc[crossover_idx] # Timestamp
+                    cross_time = df['time'].iloc[crossover_idx] 
                     trend_since_str = calc_time_ago(cross_time)
             except: pass
             
@@ -400,14 +465,23 @@ def analyze_symbol(symbol, client_args, scan_params):
             if curr_price > ce_long: expert_score += 10
             elif curr_price < ce_short: expert_score -= 10
             
+            # Add CDV Score
+            if "UP" in cdv_trend: expert_score += 15
+            else: expert_score -= 15
+            
             abs_score = abs(expert_score)
             if abs_score >= MIN_SCORE:
                 match_found = True
                 if expert_score > 0: status_msg = f"💎 Buy (Score: {expert_score})"; signal_type = "BUY"; group_tag = "BuySignal"
                 else: status_msg = f"🐻 Sell (Score: {abs(expert_score)})"; signal_type = "SELL"; group_tag = "SellSignal"
-                if adx > 25: expert_advice = "Strong Trend."
+                
+                # Divergence warning
+                if signal_type == "BUY" and "DOWN" in cdv_trend: expert_advice = "⚠️ CDV Divergence (Fake Pump Risk)."
+                elif signal_type == "SELL" and "UP" in cdv_trend: expert_advice = "⚠️ CDV Divergence (Fake Dump Risk)."
+                elif adx > 25: expert_advice = "Strong Trend."
                 else: expert_advice = "Weak Trend."
-                if signal_type == "BUY" and curr_price < ce_long: expert_advice += " ⚠️ Below CE."
+                
+                if signal_type == "BUY" and curr_price < ce_long: expert_advice += " (Below CE)"
 
         elif SEARCH_MODE == "🪤 Trap Master (Net Positions + CPD)":
             if MARKET_TYPE != "Futures": return None 
@@ -463,6 +537,7 @@ def analyze_symbol(symbol, client_args, scan_params):
                 "Symbol": symbol,
                 "Price": curr_price,
                 "RSI": round(curr_rsi, 2),
+                "CDV Trend": cdv_trend, # Added to Report
                 "Trend (MACD)": macd_trend, 
                 "Signal": signal_type,
                 "Funding": funding_rate_display,
@@ -481,14 +556,13 @@ def analyze_symbol(symbol, client_args, scan_params):
                 "Score": abs(expert_score),
                 "Expert Advice": expert_advice,
                 "ADX": round(adx, 2), "EMA200": round(ema_200, 4),
-                # Trend Since (Renamed concept)
                 "Trend Since": trend_since_str
             }
         return None
     except: return None
 
 # --- MAIN LOGIC ---
-st.title(f"🤖 Binance Expert Scanner 3.10")
+st.title(f"🤖 Binance Expert Scanner 3.12")
 
 if USE_US_BINANCE: st.warning("🇺🇸 Using Binance.US")
 if PROXY_URL: st.info("🌐 Using Proxy")
@@ -531,7 +605,10 @@ if SEARCH_MODE == "🔍 Single Coin Inspector":
                 m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Price", f"${curr['close']}")
                 m2.metric("RSI (14)", f"{curr['rsi']:.2f}")
-                m3.metric("RVOL", f"{curr['rvol']:.2f}")
+                
+                cdv_tr = "UP" if curr['cdv'] > curr['cdv_sma'] else "DOWN"
+                m3.metric("CDV Trend", cdv_tr)
+                
                 m4.metric("ADX", f"{curr['adx']:.2f}")
                 trend = "Bullish" if curr['macd'] > curr['macd_signal'] else "Bearish"
                 m5.metric("MACD Trend", trend)
@@ -545,10 +622,16 @@ if SEARCH_MODE == "🔍 Single Coin Inspector":
                     if 'nl_rsi' in df.columns:
                         f3.metric("Net Long RSI", f"{curr['nl_rsi']:.2f}")
                         f4.metric("Net Short RSI", f"{curr['ns_rsi']:.2f}")
-                        f5.metric("CPD RSI", f"{curr['cpd_rsi']:.2f}")
+                        f5.metric("OI CPD RSI", f"{curr['cpd_rsi']:.2f}")
                 st.divider()
-                st.subheader("Price & Indicator Analysis")
-                plot_chart(client, selected_insp_coin, TIMEFRAME, MARKET_TYPE)
+                
+                # --- TABS FOR SINGLE INSPECTOR ---
+                tab_a, tab_b = st.tabs(["📈 Custom Indicator Chart", "⚡ Live TradingView"])
+                with tab_a:
+                    plot_chart(client, selected_insp_coin, TIMEFRAME, MARKET_TYPE)
+                with tab_b:
+                    st.info(f"Live TradingView Chart for **{selected_insp_coin}** ({MARKET_TYPE})")
+                    render_tradingview_widget(selected_insp_coin, selected_tf_label, MARKET_TYPE)
             else: st.error("Failed to fetch data.")
 
 # --- BULK SCANNER LOGIC ---
@@ -643,16 +726,15 @@ if st.session_state.scan_performed and SEARCH_MODE != "🔍 Single Coin Inspecto
         coin_list = [item['Symbol'] for item in alerts]
         selected_coin = st.sidebar.selectbox("Select Coin to View:", coin_list)
         
-        tab1, tab2 = st.tabs(["📋 Scan Report", "📈 Chart Analysis"])
+        tab1, tab2, tab3 = st.tabs(["📋 Scan Report", "📈 Custom Indicator Chart", "⚡ Live TradingView"])
         
         with tab1:
             st.subheader(f"Found {len(alerts)} Signals")
             df_res = pd.DataFrame(alerts)
             
             if SEARCH_MODE == "💎 Expert Confluence Score":
-                st.info("💡 Score based on Multi-Factor Analysis.")
-                cols_to_show = ['Symbol', 'Price', 'Score', 'Expert Advice', 'Trend Since', 'Flip Ago', 'RSI', 'Trend (MACD)', 'Signal', 'ADX']
-                # Ensure columns exist before display
+                st.info("💡 Score based on Multi-Factor Analysis (Includes CDV Trend).")
+                cols_to_show = ['Symbol', 'Price', 'Score', 'Expert Advice', 'CDV Trend', 'Trend Since', 'Flip Ago', 'RSI', 'Signal']
                 cols_to_show = [c for c in cols_to_show if c in df_res.columns]
                 
                 df_buy = df_res[df_res['Signal'] == 'BUY'].sort_values("Score", ascending=False)
@@ -700,7 +782,11 @@ if st.session_state.scan_performed and SEARCH_MODE != "🔍 Single Coin Inspecto
                 c1.metric("Price", f"${coin_details['Price']}")
                 c2.metric("RSI", coin_details['RSI'])
                 c3.metric("Score", coin_details.get('Score', 'N/A'))
-                c4.metric("ADX", coin_details.get('ADX', 'N/A'))
+                c4.metric("CDV Trend", coin_details.get('CDV Trend', 'N/A'))
                 funding_val = coin_details.get('Current Funding', coin_details.get('Funding', 'N/A'))
                 c5.metric("Funding", funding_val)
             plot_chart(client, selected_coin, TIMEFRAME, MARKET_TYPE)
+            
+        with tab3:
+            st.info(f"Live TradingView Chart for **{selected_coin}** ({MARKET_TYPE})")
+            render_tradingview_widget(selected_coin, selected_tf_label, MARKET_TYPE)
